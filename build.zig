@@ -7,6 +7,8 @@ pub fn build(b: *std.Build) void {
     const sqlite_enabled = b.option(bool, "sqlite", "Enable SQLite support") orelse true;
     const postgres_enabled = b.option(bool, "postgres", "Enable PostgreSQL support") orelse false;
 
+    const is_macos = target.result.os.tag == .macos;
+
     // Create a module for the DB build options so source can query at comptime
     const db_options = b.addOptions();
     db_options.addOption(bool, "sqlite_enabled", sqlite_enabled);
@@ -22,17 +24,19 @@ pub fn build(b: *std.Build) void {
     if (sqlite_enabled) {
         mod.linkSystemLibrary("sqlite3", .{});
         mod.link_libc = true;
-        if (target.result.os.tag == .macos) {
+        if (is_macos) {
             mod.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/include" });
             mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/lib" });
         }
     }
 
     if (postgres_enabled) {
-        mod.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/libpq/include" });
         mod.linkSystemLibrary("pq", .{});
-        mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/libpq/lib" });
         mod.link_libc = true;
+        if (is_macos) {
+            mod.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/libpq/include" });
+            mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/libpq/lib" });
+        }
     }
 
     const mod_tests = b.addTest(.{
@@ -42,17 +46,19 @@ pub fn build(b: *std.Build) void {
     if (sqlite_enabled) {
         mod_tests.root_module.linkSystemLibrary("sqlite3", .{});
         mod_tests.root_module.link_libc = true;
-        if (target.result.os.tag == .macos) {
+        if (is_macos) {
             mod_tests.root_module.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/include" });
             mod_tests.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/lib" });
         }
     }
 
     if (postgres_enabled) {
-        mod_tests.root_module.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/libpq/include" });
         mod_tests.root_module.linkSystemLibrary("pq", .{});
-        mod_tests.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/libpq/lib" });
         mod_tests.root_module.link_libc = true;
+        if (is_macos) {
+            mod_tests.root_module.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/libpq/include" });
+            mod_tests.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/libpq/lib" });
+        }
     }
 
     const run_mod_tests = b.addRunArtifact(mod_tests);
