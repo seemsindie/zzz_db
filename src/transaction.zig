@@ -1,80 +1,92 @@
 const std = @import("std");
-const Connection = @import("connection.zig").Connection;
-const ConnectionState = @import("connection.zig").ConnectionState;
-const Pool = @import("pool.zig").Pool;
+const backend = @import("backend.zig");
+const connection_mod = @import("connection.zig");
+const ConnectionState = connection_mod.ConnectionState;
+const pool_mod = @import("pool.zig");
+const sqlite = @import("sqlite.zig");
 
-pub fn begin(conn: *Connection) !void {
-    if (conn.state == .in_transaction) return error.AlreadyInTransaction;
-    try conn.exec("BEGIN");
-    conn.state = .in_transaction;
-}
+pub fn Transaction(comptime Backend: type) type {
+    comptime backend.validate(Backend);
+    const Conn = connection_mod.Connection(Backend);
+    const PoolType = pool_mod.Pool(Backend);
 
-pub fn commit(conn: *Connection) !void {
-    try conn.exec("COMMIT");
-    conn.state = .connected;
-}
+    return struct {
+        pub fn begin(conn: *Conn) !void {
+            if (conn.state == .in_transaction) return error.AlreadyInTransaction;
+            try conn.exec("BEGIN");
+            conn.state = .in_transaction;
+        }
 
-pub fn rollback(conn: *Connection) !void {
-    try conn.exec("ROLLBACK");
-    conn.state = .connected;
-}
+        pub fn commit(conn: *Conn) !void {
+            try conn.exec("COMMIT");
+            conn.state = .connected;
+        }
 
-/// Checkout a connection from the pool, begin a transaction, run the function,
-/// commit on success or rollback on error, then check the connection back in.
-pub fn run(pool: *Pool, func: *const fn (*Connection) anyerror!void) !void {
-    var pc = try pool.checkout();
-    defer pc.release();
+        pub fn rollback(conn: *Conn) !void {
+            try conn.exec("ROLLBACK");
+            conn.state = .connected;
+        }
 
-    try begin(pc.conn);
-    errdefer rollback(pc.conn) catch {};
+        pub fn run(pool: *PoolType, func: *const fn (*Conn) anyerror!void) !void {
+            var pc = try pool.checkout();
+            defer pc.release();
 
-    try func(pc.conn);
-    try commit(pc.conn);
+            try begin(pc.conn);
+            errdefer rollback(pc.conn) catch {};
+
+            try func(pc.conn);
+            try commit(pc.conn);
+        }
+    };
 }
 
 pub const TransactionError = error{AlreadyInTransaction};
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
+const SqliteConn = connection_mod.Connection(sqlite);
+const SqlitePool = pool_mod.Pool(sqlite);
+const Txn = Transaction(sqlite);
+
 test "begin and commit" {
-    var conn = try Connection.open(.{});
+    var conn = try SqliteConn.open(.{});
     defer conn.close();
 
     try conn.exec("CREATE TABLE test (id INTEGER PRIMARY KEY, val TEXT)");
 
-    try begin(&conn);
+    try Txn.begin(&conn);
     try std.testing.expectEqual(ConnectionState.in_transaction, conn.state);
     try conn.exec("INSERT INTO test (val) VALUES ('hello')");
-    try commit(&conn);
+    try Txn.commit(&conn);
     try std.testing.expectEqual(ConnectionState.connected, conn.state);
 
     // Verify data persisted
-    var stmt = try conn.prepare("SELECT val FROM test WHERE id = 1");
+    var stmt = try sqlite.Statement.prepare(&conn.db, "SELECT val FROM test WHERE id = 1");
     defer stmt.finalize();
     _ = try stmt.step();
     try std.testing.expectEqualStrings("hello", stmt.columnText(0).?);
 }
 
 test "rollback on error" {
-    var conn = try Connection.open(.{});
+    var conn = try SqliteConn.open(.{});
     defer conn.close();
 
     try conn.exec("CREATE TABLE test (id INTEGER PRIMARY KEY, val TEXT)");
     try conn.exec("INSERT INTO test (val) VALUES ('original')");
 
-    try begin(&conn);
+    try Txn.begin(&conn);
     try conn.exec("UPDATE test SET val = 'modified'");
-    try rollback(&conn);
+    try Txn.rollback(&conn);
 
     // Verify rollback
-    var stmt = try conn.prepare("SELECT val FROM test WHERE id = 1");
+    var stmt = try sqlite.Statement.prepare(&conn.db, "SELECT val FROM test WHERE id = 1");
     defer stmt.finalize();
     _ = try stmt.step();
     try std.testing.expectEqualStrings("original", stmt.columnText(0).?);
 }
 
 test "run with pool" {
-    var pool = try Pool.init(.{ .size = 1 });
+    var pool = try SqlitePool.init(.{ .size = 1 });
     defer pool.deinit();
 
     // Create table first
@@ -82,8 +94,8 @@ test "run with pool" {
     try pc.conn.exec("CREATE TABLE test (id INTEGER PRIMARY KEY, val TEXT)");
     pc.release();
 
-    try run(&pool, &struct {
-        fn func(conn: *Connection) !void {
+    try Txn.run(&pool, &struct {
+        fn func(conn: *SqliteConn) !void {
             try conn.exec("INSERT INTO test (val) VALUES ('from_txn')");
         }
     }.func);
@@ -91,24 +103,24 @@ test "run with pool" {
     // Verify committed
     var pc2 = try pool.checkout();
     defer pc2.release();
-    var stmt = try pc2.conn.prepare("SELECT val FROM test WHERE id = 1");
+    var stmt = try sqlite.Statement.prepare(&pc2.conn.db, "SELECT val FROM test WHERE id = 1");
     defer stmt.finalize();
     _ = try stmt.step();
     try std.testing.expectEqualStrings("from_txn", stmt.columnText(0).?);
 }
 
 test "double begin error" {
-    var conn = try Connection.open(.{});
+    var conn = try SqliteConn.open(.{});
     defer conn.close();
 
-    try begin(&conn);
-    const result = begin(&conn);
+    try Txn.begin(&conn);
+    const result = Txn.begin(&conn);
     try std.testing.expectError(error.AlreadyInTransaction, result);
-    try rollback(&conn);
+    try Txn.rollback(&conn);
 }
 
 test "run rollback on error" {
-    var pool = try Pool.init(.{ .size = 1 });
+    var pool = try SqlitePool.init(.{ .size = 1 });
     defer pool.deinit();
 
     var pc = try pool.checkout();
@@ -116,8 +128,8 @@ test "run rollback on error" {
     try pc.conn.exec("INSERT INTO test (val) VALUES ('keep')");
     pc.release();
 
-    const result = run(&pool, &struct {
-        fn func(conn: *Connection) !void {
+    const result = Txn.run(&pool, &struct {
+        fn func(conn: *SqliteConn) !void {
             try conn.exec("UPDATE test SET val = 'changed'");
             return error.IntentionalError;
         }
@@ -127,7 +139,7 @@ test "run rollback on error" {
     // Verify rollback — original data intact
     var pc2 = try pool.checkout();
     defer pc2.release();
-    var stmt = try pc2.conn.prepare("SELECT val FROM test WHERE id = 1");
+    var stmt = try sqlite.Statement.prepare(&pc2.conn.db, "SELECT val FROM test WHERE id = 1");
     defer stmt.finalize();
     _ = try stmt.step();
     try std.testing.expectEqualStrings("keep", stmt.columnText(0).?);

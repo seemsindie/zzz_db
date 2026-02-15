@@ -1,5 +1,6 @@
 const std = @import("std");
 const schema_mod = @import("schema.zig");
+const Dialect = @import("backend.zig").Dialect;
 
 pub const Op = enum {
     eq,
@@ -125,7 +126,7 @@ pub fn Query(comptime T: type) type {
             bind_values: []const ?[]const u8,
         };
 
-        pub fn toSql(self: Self, allocator: std.mem.Allocator) !SqlResult {
+        pub fn toSql(self: Self, allocator: std.mem.Allocator, dialect: Dialect) !SqlResult {
             var parts: std.ArrayList(u8) = .empty;
             errdefer parts.deinit(allocator);
 
@@ -143,7 +144,7 @@ pub fn Query(comptime T: type) type {
             try parts.appendSlice(allocator, M.Table);
 
             // WHERE
-            try self.appendWhere(&parts, &bind_list, allocator);
+            try self.appendWhere(&parts, &bind_list, allocator, dialect);
 
             // ORDER BY
             if (self.order_count > 0) {
@@ -181,7 +182,7 @@ pub fn Query(comptime T: type) type {
             };
         }
 
-        pub fn toCountSql(self: Self, allocator: std.mem.Allocator) !SqlResult {
+        pub fn toCountSql(self: Self, allocator: std.mem.Allocator, dialect: Dialect) !SqlResult {
             var parts: std.ArrayList(u8) = .empty;
             errdefer parts.deinit(allocator);
 
@@ -192,7 +193,7 @@ pub fn Query(comptime T: type) type {
             try parts.appendSlice(allocator, M.Table);
 
             // WHERE
-            try self.appendWhere(&parts, &bind_list, allocator);
+            try self.appendWhere(&parts, &bind_list, allocator, dialect);
 
             return .{
                 .sql = try parts.toOwnedSlice(allocator),
@@ -200,9 +201,10 @@ pub fn Query(comptime T: type) type {
             };
         }
 
-        fn appendWhere(self: Self, parts: *std.ArrayList(u8), bind_list: *std.ArrayList(?[]const u8), allocator: std.mem.Allocator) !void {
+        fn appendWhere(self: Self, parts: *std.ArrayList(u8), bind_list: *std.ArrayList(?[]const u8), allocator: std.mem.Allocator, dialect: Dialect) !void {
             if (self.where_count > 0) {
                 try parts.appendSlice(allocator, " WHERE ");
+                var param_idx: usize = 1;
                 for (0..self.where_count) |i| {
                     const wc = self.where_clauses[i];
                     if (i > 0) {
@@ -210,13 +212,6 @@ pub fn Query(comptime T: type) type {
                     }
                     try parts.appendSlice(allocator, wc.field);
                     switch (wc.op) {
-                        .eq => try parts.appendSlice(allocator, " = ?"),
-                        .neq => try parts.appendSlice(allocator, " != ?"),
-                        .gt => try parts.appendSlice(allocator, " > ?"),
-                        .lt => try parts.appendSlice(allocator, " < ?"),
-                        .gte => try parts.appendSlice(allocator, " >= ?"),
-                        .lte => try parts.appendSlice(allocator, " <= ?"),
-                        .like => try parts.appendSlice(allocator, " LIKE ?"),
                         .is_null => {
                             try parts.appendSlice(allocator, " IS NULL");
                             continue;
@@ -225,8 +220,32 @@ pub fn Query(comptime T: type) type {
                             try parts.appendSlice(allocator, " IS NOT NULL");
                             continue;
                         },
+                        else => {},
                     }
+
+                    const op_str = switch (wc.op) {
+                        .eq => " = ",
+                        .neq => " != ",
+                        .gt => " > ",
+                        .lt => " < ",
+                        .gte => " >= ",
+                        .lte => " <= ",
+                        .like => " LIKE ",
+                        .is_null, .is_not_null => unreachable,
+                    };
+                    try parts.appendSlice(allocator, op_str);
+
+                    if (dialect == .postgres) {
+                        try parts.append(allocator, '$');
+                        var idx_buf: [16]u8 = undefined;
+                        const idx_str = std.fmt.bufPrint(&idx_buf, "{d}", .{param_idx}) catch "0";
+                        try parts.appendSlice(allocator, idx_str);
+                    } else {
+                        try parts.append(allocator, '?');
+                    }
+
                     try bind_list.append(allocator, wc.value);
+                    param_idx += 1;
                 }
             }
         }
@@ -251,7 +270,7 @@ const TestUser = struct {
 
 test "SELECT all" {
     const q = Query(TestUser).init();
-    const result = try q.toSql(std.testing.allocator);
+    const result = try q.toSql(std.testing.allocator, .sqlite);
     defer std.testing.allocator.free(result.sql);
     defer std.testing.allocator.free(result.bind_values);
 
@@ -261,7 +280,7 @@ test "SELECT all" {
 
 test "WHERE clause" {
     const q = Query(TestUser).init().where("name", .eq, "alice");
-    const result = try q.toSql(std.testing.allocator);
+    const result = try q.toSql(std.testing.allocator, .sqlite);
     defer std.testing.allocator.free(result.sql);
     defer std.testing.allocator.free(result.bind_values);
 
@@ -274,7 +293,7 @@ test "AND/OR composition" {
     const q = Query(TestUser).init()
         .where("name", .eq, "alice")
         .orWhere("name", .eq, "bob");
-    const result = try q.toSql(std.testing.allocator);
+    const result = try q.toSql(std.testing.allocator, .sqlite);
     defer std.testing.allocator.free(result.sql);
     defer std.testing.allocator.free(result.bind_values);
 
@@ -284,7 +303,7 @@ test "AND/OR composition" {
 
 test "ORDER BY" {
     const q = Query(TestUser).init().orderBy("name", .asc);
-    const result = try q.toSql(std.testing.allocator);
+    const result = try q.toSql(std.testing.allocator, .sqlite);
     defer std.testing.allocator.free(result.sql);
     defer std.testing.allocator.free(result.bind_values);
 
@@ -293,7 +312,7 @@ test "ORDER BY" {
 
 test "LIMIT and OFFSET" {
     const q = Query(TestUser).init().limit(10).offset(20);
-    const result = try q.toSql(std.testing.allocator);
+    const result = try q.toSql(std.testing.allocator, .sqlite);
     defer std.testing.allocator.free(result.sql);
     defer std.testing.allocator.free(result.bind_values);
 
@@ -305,7 +324,7 @@ test "combined query" {
         .where("email", .like, "%@example.com")
         .orderBy("name", .desc)
         .limit(5);
-    const result = try q.toSql(std.testing.allocator);
+    const result = try q.toSql(std.testing.allocator, .sqlite);
     defer std.testing.allocator.free(result.sql);
     defer std.testing.allocator.free(result.bind_values);
 
@@ -314,7 +333,7 @@ test "combined query" {
 
 test "toCountSql" {
     const q = Query(TestUser).init().where("name", .eq, "alice");
-    const result = try q.toCountSql(std.testing.allocator);
+    const result = try q.toCountSql(std.testing.allocator, .sqlite);
     defer std.testing.allocator.free(result.sql);
     defer std.testing.allocator.free(result.bind_values);
 
@@ -323,7 +342,7 @@ test "toCountSql" {
 
 test "select fields" {
     const q = Query(TestUser).init().select("name, email");
-    const result = try q.toSql(std.testing.allocator);
+    const result = try q.toSql(std.testing.allocator, .sqlite);
     defer std.testing.allocator.free(result.sql);
     defer std.testing.allocator.free(result.bind_values);
 
@@ -332,7 +351,7 @@ test "select fields" {
 
 test "raw fragment" {
     const q = Query(TestUser).init().raw("FOR UPDATE");
-    const result = try q.toSql(std.testing.allocator);
+    const result = try q.toSql(std.testing.allocator, .sqlite);
     defer std.testing.allocator.free(result.sql);
     defer std.testing.allocator.free(result.bind_values);
 
@@ -343,10 +362,31 @@ test "IS NULL and IS NOT NULL" {
     const q = Query(TestUser).init()
         .where("email", .is_null, null)
         .where("name", .is_not_null, null);
-    const result = try q.toSql(std.testing.allocator);
+    const result = try q.toSql(std.testing.allocator, .sqlite);
     defer std.testing.allocator.free(result.sql);
     defer std.testing.allocator.free(result.bind_values);
 
     try std.testing.expectEqualStrings("SELECT id, name, email, inserted_at, updated_at FROM users WHERE email IS NULL AND name IS NOT NULL", result.sql);
     try std.testing.expectEqual(@as(usize, 0), result.bind_values.len);
+}
+
+test "postgres WHERE with $N placeholders" {
+    const q = Query(TestUser).init()
+        .where("name", .eq, "alice")
+        .where("email", .like, "%@example.com");
+    const result = try q.toSql(std.testing.allocator, .postgres);
+    defer std.testing.allocator.free(result.sql);
+    defer std.testing.allocator.free(result.bind_values);
+
+    try std.testing.expectEqualStrings("SELECT id, name, email, inserted_at, updated_at FROM users WHERE name = $1 AND email LIKE $2", result.sql);
+    try std.testing.expectEqual(@as(usize, 2), result.bind_values.len);
+}
+
+test "postgres toCountSql with $N placeholders" {
+    const q = Query(TestUser).init().where("name", .eq, "alice");
+    const result = try q.toCountSql(std.testing.allocator, .postgres);
+    defer std.testing.allocator.free(result.sql);
+    defer std.testing.allocator.free(result.bind_values);
+
+    try std.testing.expectEqualStrings("SELECT COUNT(*) FROM users WHERE name = $1", result.sql);
 }

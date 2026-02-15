@@ -1,40 +1,49 @@
 //! zzz_db - Database Layer for the Zzz Web Framework
 //!
-//! Provides SQLite support with connection pooling, comptime schema definitions,
+//! Provides SQLite and PostgreSQL support with connection pooling, comptime schema definitions,
 //! a composable query builder, and type-safe Repo operations.
+//! All core types are generic over a backend type (sqlite or postgres).
 
 const std = @import("std");
 
-// SQLite
+// Backend
+pub const backend = @import("backend.zig");
+pub const Dialect = backend.Dialect;
+
+// Backends
 pub const sqlite = @import("sqlite.zig");
 pub const SqliteError = sqlite.SqliteError;
 
-// Connection
-pub const Connection = @import("connection.zig").Connection;
-pub const ConnectionConfig = @import("connection.zig").ConnectionConfig;
+const db_options = @import("db_options");
+pub const postgres = if (db_options.postgres_enabled) @import("postgres.zig") else struct {};
 
-// Pool
+// Generic types
+pub const Connection = @import("connection.zig").Connection;
+pub const ConnectionState = @import("connection.zig").ConnectionState;
 pub const Pool = @import("pool.zig").Pool;
 pub const PoolConfig = @import("pool.zig").PoolConfig;
 pub const PooledConnection = @import("pool.zig").PooledConnection;
+pub const Repo = @import("repo.zig").Repo;
+pub const Transaction = @import("transaction.zig").Transaction;
 
-// Schema
+// Schema & Query (unchanged)
 pub const Schema = @import("schema.zig");
-
-// Query
 pub const Query = @import("query.zig").Query;
 pub const Op = @import("query.zig").Op;
 pub const Order = @import("query.zig").Order;
 
-// Repo
-pub const Repo = @import("repo.zig").Repo;
+// Helpers
 pub const freeAll = @import("repo.zig").freeAll;
 pub const freeOne = @import("repo.zig").freeOne;
 
-// Transactions
-pub const Transaction = @import("transaction.zig");
+// Convenience aliases — backward compatible
+pub const SqliteConnection = Connection(sqlite);
+pub const SqlitePool = Pool(sqlite);
+pub const SqlitePoolConfig = PoolConfig(sqlite);
+pub const SqliteRepo = Repo(sqlite);
+pub const SqliteTransaction = Transaction(sqlite);
 
-pub const version = "0.1.0";
+pub const version = "0.2.0";
 
 test {
     std.testing.refAllDecls(@This());

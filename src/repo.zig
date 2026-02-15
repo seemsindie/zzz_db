@@ -1,232 +1,255 @@
 const std = @import("std");
-const sqlite = @import("sqlite.zig");
+const backend_mod = @import("backend.zig");
 const schema_mod = @import("schema.zig");
 const query_mod = @import("query.zig");
-const Pool = @import("pool.zig").Pool;
-const Connection = @import("connection.zig").Connection;
+const pool_mod = @import("pool.zig");
+const sqlite = @import("sqlite.zig");
 
-pub const Repo = struct {
-    pool: *Pool,
+pub fn Repo(comptime Backend: type) type {
+    comptime backend_mod.validate(Backend);
+    const PoolType = pool_mod.Pool(Backend);
 
-    pub fn init(pool: *Pool) Repo {
-        return .{ .pool = pool };
-    }
+    return struct {
+        const Self = @This();
 
-    /// Execute a query and return all matching rows as a slice of T.
-    pub fn all(self: Repo, comptime T: type, q: query_mod.Query(T), allocator: std.mem.Allocator) ![]T {
-        const sql_result = try q.toSql(allocator);
-        defer allocator.free(sql_result.sql);
-        defer allocator.free(sql_result.bind_values);
+        pool: *PoolType,
 
-        // Null-terminate the SQL
-        const sql_z = try allocator.dupeZ(u8, sql_result.sql);
-        defer allocator.free(sql_z);
+        pub fn init(pool: *PoolType) Self {
+            return .{ .pool = pool };
+        }
 
-        var pc = try self.pool.checkout();
-        defer pc.release();
+        /// Execute a query and return all matching rows as a slice of T.
+        pub fn all(self: Self, comptime T: type, q: query_mod.Query(T), allocator: std.mem.Allocator) ![]T {
+            const sql_result = try q.toSql(allocator, Backend.dialect);
+            defer allocator.free(sql_result.sql);
+            defer allocator.free(sql_result.bind_values);
 
-        var stmt = try sqlite.Statement.prepare(&pc.conn.db, sql_z);
-        defer stmt.finalize();
+            // Null-terminate the SQL
+            const sql_z = try allocator.dupeZ(u8, sql_result.sql);
+            defer allocator.free(sql_z);
 
-        // Bind values
-        for (sql_result.bind_values, 0..) |val, i| {
-            if (val) |v| {
-                try stmt.bindText(@intCast(i + 1), v);
-            } else {
-                try stmt.bindNull(@intCast(i + 1));
+            var pc = try self.pool.checkout();
+            defer pc.release();
+
+            var rs = try Backend.ResultSet.query(&pc.conn.db, sql_z, sql_result.bind_values);
+            defer rs.deinit();
+
+            // Collect results
+            var results: std.ArrayList(T) = .empty;
+            errdefer {
+                for (results.items) |*item| {
+                    freeStructStrings(T, item, allocator);
+                }
+                results.deinit(allocator);
             }
-        }
 
-        // Collect results
-        var results: std.ArrayList(T) = .empty;
-        errdefer {
-            for (results.items) |*item| {
-                freeStructStrings(T, item, allocator);
+            while (try rs.next()) {
+                const row = try mapRow(T, Backend, &rs, allocator);
+                try results.append(allocator, row);
             }
-            results.deinit(allocator);
+
+            return try results.toOwnedSlice(allocator);
         }
 
-        while (try stmt.step()) {
-            const row = try mapRow(T, &stmt, allocator);
-            try results.append(allocator, row);
-        }
-
-        return try results.toOwnedSlice(allocator);
-    }
-
-    /// Execute a query and return the first matching row, or null.
-    pub fn one(self: Repo, comptime T: type, q: query_mod.Query(T), allocator: std.mem.Allocator) !?T {
-        const limited = q.limit(1);
-        const results = try self.all(T, limited, allocator);
-        defer allocator.free(results);
-        if (results.len == 0) return null;
-        // We keep the first item's strings alive, free the rest
-        if (results.len > 1) {
-            for (results[1..]) |*item| {
-                freeStructStrings(T, item, allocator);
-            }
-        }
-        return results[0];
-    }
-
-    /// Get a single record by primary key.
-    pub fn get(self: Repo, comptime T: type, id: i64, allocator: std.mem.Allocator) !?T {
-        const M = schema_mod.meta(T);
-        const sql = comptime "SELECT " ++ M.columns ++ " FROM " ++ M.Table ++ " WHERE " ++ M.PrimaryKey ++ " = ?";
-        const sql_z: [:0]const u8 = sql;
-
-        var pc = try self.pool.checkout();
-        defer pc.release();
-
-        var stmt = try sqlite.Statement.prepare(&pc.conn.db, sql_z);
-        defer stmt.finalize();
-
-        try stmt.bindInt64(1, id);
-
-        if (try stmt.step()) {
-            return try mapRow(T, &stmt, allocator);
-        }
-        return null;
-    }
-
-    /// Insert a record. Returns the record with the new primary key set.
-    pub fn insert(self: Repo, comptime T: type, record: T, allocator: std.mem.Allocator) !T {
-        const M = schema_mod.meta(T);
-        const sql = comptime "INSERT INTO " ++ M.Table ++ " (" ++ M.insert_columns ++ ") VALUES (" ++ M.insert_placeholders ++ ")";
-        const sql_z: [:0]const u8 = sql;
-
-        var pc = try self.pool.checkout();
-        defer pc.release();
-
-        var stmt = try sqlite.Statement.prepare(&pc.conn.db, sql_z);
-        defer stmt.finalize();
-
-        // Bind non-PK fields
-        comptime var bind_idx: c_int = 1;
-        const struct_fields = @typeInfo(T).@"struct".fields;
-        inline for (struct_fields) |f| {
-            if (!comptime std.mem.eql(u8, f.name, M.PrimaryKey)) {
-                const value = @field(record, f.name);
-                try bindField(&stmt, bind_idx, f.type, value);
-                bind_idx += 1;
-            }
-        }
-
-        _ = try stmt.step();
-
-        const new_id = pc.conn.lastInsertRowId();
-
-        // Return the record with the new ID
-        var result = record;
-        @field(result, M.PrimaryKey) = new_id;
-        // Dupe any string fields so caller owns them
-        inline for (struct_fields) |f| {
-            if (comptime isStringType(f.type)) {
-                const val = @field(record, f.name);
-                @field(result, f.name) = try allocator.dupe(u8, val);
-            }
-        }
-        return result;
-    }
-
-    /// Update a record by primary key.
-    pub fn update(self: Repo, comptime T: type, record: T, allocator: std.mem.Allocator) !T {
-        const M = schema_mod.meta(T);
-
-        // Build "SET col1 = ?, col2 = ?, ..." for non-PK fields
-        const set_clause = comptime blk: {
-            var buf: []const u8 = "";
-            var first = true;
-            for (@typeInfo(T).@"struct".fields) |f| {
-                if (!std.mem.eql(u8, f.name, M.PrimaryKey)) {
-                    if (!first) buf = buf ++ ", ";
-                    buf = buf ++ f.name ++ " = ?";
-                    first = false;
+        /// Execute a query and return the first matching row, or null.
+        pub fn one(self: Self, comptime T: type, q: query_mod.Query(T), allocator: std.mem.Allocator) !?T {
+            const limited = q.limit(1);
+            const results = try self.all(T, limited, allocator);
+            defer allocator.free(results);
+            if (results.len == 0) return null;
+            // We keep the first item's strings alive, free the rest
+            if (results.len > 1) {
+                for (results[1..]) |*item| {
+                    freeStructStrings(T, item, allocator);
                 }
             }
-            break :blk buf;
-        };
+            return results[0];
+        }
 
-        const sql = comptime "UPDATE " ++ M.Table ++ " SET " ++ set_clause ++ " WHERE " ++ M.PrimaryKey ++ " = ?";
-        const sql_z: [:0]const u8 = sql;
+        /// Get a single record by primary key.
+        pub fn get(self: Self, comptime T: type, id: i64, allocator: std.mem.Allocator) !?T {
+            const M = schema_mod.meta(T);
+            const sql = comptime "SELECT " ++ M.columns ++ " FROM " ++ M.Table ++ " WHERE " ++ M.PrimaryKey ++
+                (if (Backend.dialect == .postgres) " = $1" else " = ?");
+            const sql_z: [:0]const u8 = sql;
 
-        var pc = try self.pool.checkout();
-        defer pc.release();
+            var id_buf: [32]u8 = undefined;
+            const id_str = std.fmt.bufPrint(&id_buf, "{d}", .{id}) catch return null;
 
-        var stmt = try sqlite.Statement.prepare(&pc.conn.db, sql_z);
-        defer stmt.finalize();
+            var pc = try self.pool.checkout();
+            defer pc.release();
 
-        // Bind SET values
-        comptime var bind_idx: c_int = 1;
-        const struct_fields = @typeInfo(T).@"struct".fields;
-        inline for (struct_fields) |f| {
-            if (!comptime std.mem.eql(u8, f.name, M.PrimaryKey)) {
-                const value = @field(record, f.name);
-                try bindField(&stmt, bind_idx, f.type, value);
-                bind_idx += 1;
+            const bind_vals: []const ?[]const u8 = &.{id_str};
+            var rs = try Backend.ResultSet.query(&pc.conn.db, sql_z, bind_vals);
+            defer rs.deinit();
+
+            if (try rs.next()) {
+                return try mapRow(T, Backend, &rs, allocator);
             }
+            return null;
         }
 
-        // Bind WHERE pk = ?
-        try stmt.bindInt64(bind_idx, @field(record, M.PrimaryKey));
+        /// Insert a record. Returns the record with the new primary key set.
+        pub fn insert(self: Self, comptime T: type, record: T, allocator: std.mem.Allocator) !T {
+            const M = schema_mod.meta(T);
+            const placeholders = comptime if (Backend.dialect == .postgres) M.insert_placeholders_pg else M.insert_placeholders;
+            const sql = comptime "INSERT INTO " ++ M.Table ++ " (" ++ M.insert_columns ++ ") VALUES (" ++ placeholders ++ ")" ++
+                (if (Backend.dialect == .postgres) " RETURNING " ++ M.PrimaryKey else "");
+            const sql_z: [:0]const u8 = sql;
 
-        _ = try stmt.step();
-
-        // Return the record with duped strings
-        var result = record;
-        inline for (struct_fields) |f| {
-            if (comptime isStringType(f.type)) {
-                @field(result, f.name) = try allocator.dupe(u8, @field(record, f.name));
+            // Convert all non-PK fields to text for binding
+            const struct_fields = @typeInfo(T).@"struct".fields;
+            comptime var insert_field_count: usize = 0;
+            comptime {
+                for (struct_fields) |f| {
+                    if (!std.mem.eql(u8, f.name, M.PrimaryKey)) {
+                        insert_field_count += 1;
+                    }
+                }
             }
-        }
-        return result;
-    }
 
-    /// Delete a record by primary key.
-    pub fn delete(self: Repo, comptime T: type, record: T) !void {
-        const M = schema_mod.meta(T);
-        const sql = comptime "DELETE FROM " ++ M.Table ++ " WHERE " ++ M.PrimaryKey ++ " = ?";
-        const sql_z: [:0]const u8 = sql;
+            var text_bufs: [insert_field_count][64]u8 = undefined;
+            var bind_vals: [insert_field_count]?[]const u8 = undefined;
 
-        var pc = try self.pool.checkout();
-        defer pc.release();
-
-        var stmt = try sqlite.Statement.prepare(&pc.conn.db, sql_z);
-        defer stmt.finalize();
-
-        try stmt.bindInt64(1, @field(record, M.PrimaryKey));
-        _ = try stmt.step();
-    }
-
-    /// Check if any records match the query.
-    pub fn exists(self: Repo, comptime T: type, q: query_mod.Query(T), allocator: std.mem.Allocator) !bool {
-        const sql_result = try q.toCountSql(allocator);
-        defer allocator.free(sql_result.sql);
-        defer allocator.free(sql_result.bind_values);
-
-        const sql_z = try allocator.dupeZ(u8, sql_result.sql);
-        defer allocator.free(sql_z);
-
-        var pc = try self.pool.checkout();
-        defer pc.release();
-
-        var stmt = try sqlite.Statement.prepare(&pc.conn.db, sql_z);
-        defer stmt.finalize();
-
-        for (sql_result.bind_values, 0..) |val, i| {
-            if (val) |v| {
-                try stmt.bindText(@intCast(i + 1), v);
-            } else {
-                try stmt.bindNull(@intCast(i + 1));
+            comptime var bind_idx: usize = 0;
+            inline for (struct_fields) |f| {
+                if (!comptime std.mem.eql(u8, f.name, M.PrimaryKey)) {
+                    const value = @field(record, f.name);
+                    bind_vals[bind_idx] = fieldToText(&text_bufs[bind_idx], f.type, value);
+                    bind_idx += 1;
+                }
             }
+
+            var pc = try self.pool.checkout();
+            defer pc.release();
+
+            var exec_result = try Backend.ExecResult.exec(&pc.conn.db, sql_z, &bind_vals);
+            defer exec_result.deinit();
+
+            const new_id = exec_result.lastInsertId();
+
+            // Return the record with the new ID
+            var result = record;
+            @field(result, M.PrimaryKey) = new_id;
+            // Dupe any string fields so caller owns them
+            inline for (struct_fields) |f| {
+                if (comptime isStringType(f.type)) {
+                    const val = @field(record, f.name);
+                    @field(result, f.name) = try allocator.dupe(u8, val);
+                }
+            }
+            return result;
         }
 
-        if (try stmt.step()) {
-            return stmt.columnInt64(0) > 0;
+        /// Update a record by primary key.
+        pub fn update(self: Self, comptime T: type, record: T, allocator: std.mem.Allocator) !T {
+            const M = schema_mod.meta(T);
+
+            // Build "SET col1 = ?, col2 = ?, ..." for non-PK fields with dialect-aware placeholders
+            const struct_fields = @typeInfo(T).@"struct".fields;
+            const set_clause = comptime blk: {
+                var buf: []const u8 = "";
+                var first = true;
+                var idx: usize = 1;
+                for (struct_fields) |f| {
+                    if (!std.mem.eql(u8, f.name, M.PrimaryKey)) {
+                        if (!first) buf = buf ++ ", ";
+                        buf = buf ++ f.name ++ if (Backend.dialect == .postgres) (" = $" ++ schema_mod.intToStr(idx)) else " = ?";
+                        first = false;
+                        idx += 1;
+                    }
+                }
+                break :blk .{ buf, idx };
+            };
+
+            const pk_placeholder = comptime if (Backend.dialect == .postgres) " = $" ++ schema_mod.intToStr(set_clause[1]) else " = ?";
+            const sql = comptime "UPDATE " ++ M.Table ++ " SET " ++ set_clause[0] ++ " WHERE " ++ M.PrimaryKey ++ pk_placeholder;
+            const sql_z: [:0]const u8 = sql;
+
+            // Count non-PK fields + 1 for the WHERE PK bind
+            comptime var insert_field_count: usize = 0;
+            comptime {
+                for (struct_fields) |f| {
+                    if (!std.mem.eql(u8, f.name, M.PrimaryKey)) {
+                        insert_field_count += 1;
+                    }
+                }
+            }
+            const total_binds = insert_field_count + 1;
+
+            var text_bufs: [total_binds][64]u8 = undefined;
+            var bind_vals: [total_binds]?[]const u8 = undefined;
+
+            comptime var bind_idx: usize = 0;
+            inline for (struct_fields) |f| {
+                if (!comptime std.mem.eql(u8, f.name, M.PrimaryKey)) {
+                    const value = @field(record, f.name);
+                    bind_vals[bind_idx] = fieldToText(&text_bufs[bind_idx], f.type, value);
+                    bind_idx += 1;
+                }
+            }
+
+            // Bind the PK value for the WHERE clause
+            const pk_val = @field(record, M.PrimaryKey);
+            bind_vals[bind_idx] = fieldToText(&text_bufs[bind_idx], @TypeOf(pk_val), pk_val);
+
+            var pc = try self.pool.checkout();
+            defer pc.release();
+
+            var exec_result = try Backend.ExecResult.exec(&pc.conn.db, sql_z, &bind_vals);
+            defer exec_result.deinit();
+
+            // Return the record with duped strings
+            var result = record;
+            inline for (struct_fields) |f| {
+                if (comptime isStringType(f.type)) {
+                    @field(result, f.name) = try allocator.dupe(u8, @field(record, f.name));
+                }
+            }
+            return result;
         }
-        return false;
-    }
-};
+
+        /// Delete a record by primary key.
+        pub fn delete(self: Self, comptime T: type, record: T) !void {
+            const M = schema_mod.meta(T);
+            const sql = comptime "DELETE FROM " ++ M.Table ++ " WHERE " ++ M.PrimaryKey ++
+                (if (Backend.dialect == .postgres) " = $1" else " = ?");
+            const sql_z: [:0]const u8 = sql;
+
+            var id_buf: [64]u8 = undefined;
+            const pk_val = @field(record, M.PrimaryKey);
+            const id_str = fieldToText(&id_buf, @TypeOf(pk_val), pk_val);
+
+            var pc = try self.pool.checkout();
+            defer pc.release();
+
+            const bind_vals: []const ?[]const u8 = &.{id_str};
+            var exec_result = try Backend.ExecResult.exec(&pc.conn.db, sql_z, bind_vals);
+            defer exec_result.deinit();
+        }
+
+        /// Check if any records match the query.
+        pub fn exists(self: Self, comptime T: type, q: query_mod.Query(T), allocator: std.mem.Allocator) !bool {
+            const sql_result = try q.toCountSql(allocator, Backend.dialect);
+            defer allocator.free(sql_result.sql);
+            defer allocator.free(sql_result.bind_values);
+
+            const sql_z = try allocator.dupeZ(u8, sql_result.sql);
+            defer allocator.free(sql_z);
+
+            var pc = try self.pool.checkout();
+            defer pc.release();
+
+            var rs = try Backend.ResultSet.query(&pc.conn.db, sql_z, sql_result.bind_values);
+            defer rs.deinit();
+
+            if (try rs.next()) {
+                return rs.columnInt64(0) > 0;
+            }
+            return false;
+        }
+    };
+}
 
 // ── Internal helpers ───────────────────────────────────────────────────
 
@@ -242,63 +265,62 @@ fn isOptionalString(comptime T: type) bool {
     return false;
 }
 
-fn bindField(stmt: *sqlite.Statement, col: c_int, comptime FieldType: type, value: FieldType) !void {
+fn fieldToText(buf: *[64]u8, comptime FieldType: type, value: FieldType) ?[]const u8 {
     const info = @typeInfo(FieldType);
     if (info == .optional) {
         if (value) |v| {
-            try bindField(stmt, col, info.optional.child, v);
+            return fieldToText(buf, info.optional.child, v);
         } else {
-            try stmt.bindNull(col);
+            return null;
         }
-        return;
     }
 
     if (FieldType == []const u8) {
-        try stmt.bindText(col, value);
+        return value;
     } else if (FieldType == i64 or FieldType == i32 or FieldType == u32 or FieldType == u64 or FieldType == i16 or FieldType == u16) {
-        try stmt.bindInt64(col, @intCast(value));
+        return std.fmt.bufPrint(buf, "{d}", .{@as(i64, @intCast(value))}) catch return null;
     } else if (FieldType == f64 or FieldType == f32) {
-        try stmt.bindDouble(col, @floatCast(value));
+        return std.fmt.bufPrint(buf, "{d}", .{@as(f64, @floatCast(value))}) catch return null;
     } else if (FieldType == bool) {
-        try stmt.bindInt64(col, if (value) 1 else 0);
+        return if (value) "1" else "0";
     } else {
-        @compileError("Unsupported field type for binding: " ++ @typeName(FieldType));
+        @compileError("Unsupported field type for fieldToText: " ++ @typeName(FieldType));
     }
 }
 
-fn readColumn(comptime T: type, stmt: *sqlite.Statement, col: c_int, allocator: std.mem.Allocator) !T {
+fn readColumn(comptime T: type, comptime Backend: type, rs: *Backend.ResultSet, col: c_int, allocator: std.mem.Allocator) !T {
     const info = @typeInfo(T);
     if (info == .optional) {
-        if (stmt.columnIsNull(col)) return null;
-        return try readColumn(info.optional.child, stmt, col, allocator);
+        if (rs.columnIsNull(col)) return null;
+        return try readColumn(info.optional.child, Backend, rs, col, allocator);
     }
 
     if (T == []const u8) {
-        if (stmt.columnText(col)) |text| {
+        if (rs.columnText(col)) |text| {
             return try allocator.dupe(u8, text);
         }
         return try allocator.dupe(u8, "");
     } else if (T == i64) {
-        return stmt.columnInt64(col);
+        return rs.columnInt64(col);
     } else if (T == i32) {
-        return @intCast(stmt.columnInt64(col));
+        return @intCast(rs.columnInt64(col));
     } else if (T == f64) {
-        return stmt.columnDouble(col);
+        return rs.columnDouble(col);
     } else if (T == f32) {
-        return @floatCast(stmt.columnDouble(col));
+        return @floatCast(rs.columnDouble(col));
     } else if (T == bool) {
-        return stmt.columnInt64(col) != 0;
+        return rs.columnInt64(col) != 0;
     } else {
         @compileError("Unsupported column type: " ++ @typeName(T));
     }
 }
 
-fn mapRow(comptime T: type, stmt: *sqlite.Statement, allocator: std.mem.Allocator) !T {
+fn mapRow(comptime T: type, comptime Backend: type, rs: *Backend.ResultSet, allocator: std.mem.Allocator) !T {
     var result: T = undefined;
     const struct_fields = @typeInfo(T).@"struct".fields;
 
     inline for (struct_fields, 0..) |f, i| {
-        @field(result, f.name) = readColumn(f.type, stmt, @intCast(i), allocator) catch |err| {
+        @field(result, f.name) = readColumn(f.type, Backend, rs, @intCast(i), allocator) catch |err| {
             // Clean up any previously allocated strings
             inline for (struct_fields, 0..) |f2, j| {
                 if (j < i and comptime (isStringType(f2.type) or isOptionalString(f2.type))) {
@@ -357,10 +379,10 @@ const TestUser = struct {
 };
 
 const TestContext = struct {
-    pool: Pool,
+    pool: pool_mod.Pool(sqlite),
 
     fn setup() !TestContext {
-        var pool = try Pool.init(.{ .size = 1 });
+        var pool = try pool_mod.Pool(sqlite).init(.{ .size = 1 });
         errdefer pool.deinit();
 
         // Create table
@@ -375,8 +397,8 @@ const TestContext = struct {
         self.pool.deinit();
     }
 
-    fn repo(self: *TestContext) Repo {
-        return Repo.init(&self.pool);
+    fn repo(self: *TestContext) Repo(sqlite) {
+        return Repo(sqlite).init(&self.pool);
     }
 };
 

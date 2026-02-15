@@ -1,4 +1,22 @@
 const std = @import("std");
+const backend = @import("backend.zig");
+pub const Dialect = backend.Dialect;
+
+pub fn intToStr(comptime n: usize) []const u8 {
+    if (n == 0) return "0";
+    // Decompose digits manually — comptime requires inline loops
+    const d0: u8 = @intCast(n % 10);
+    const r0 = n / 10;
+    if (r0 == 0) return &[_]u8{'0' + d0};
+    const d1: u8 = @intCast(r0 % 10);
+    const r1 = r0 / 10;
+    if (r1 == 0) return &[_]u8{ '0' + d1, '0' + d0 };
+    const d2: u8 = @intCast(r1 % 10);
+    const r2 = r1 / 10;
+    if (r2 == 0) return &[_]u8{ '0' + d2, '0' + d1, '0' + d0 };
+    const d3: u8 = @intCast(r2 % 10);
+    return &[_]u8{ '0' + d3, '0' + d2, '0' + d1, '0' + d0 };
+}
 
 pub const SqlType = enum {
     integer,
@@ -49,6 +67,17 @@ fn sqlTypeStr(comptime st: SqlType) []const u8 {
         .text => "TEXT",
         .boolean => "BOOLEAN",
         .blob => "BLOB",
+    };
+}
+
+fn sqlTypeStrPg(comptime st: SqlType) []const u8 {
+    return switch (st) {
+        .integer => "INTEGER",
+        .bigint => "BIGINT",
+        .real => "DOUBLE PRECISION",
+        .text => "TEXT",
+        .boolean => "BOOLEAN",
+        .blob => "BYTEA",
     };
 }
 
@@ -111,7 +140,7 @@ pub fn define(comptime T: type, comptime opts: SchemaOpts) type {
         break :blk buf;
     };
 
-    // Build insert_placeholders_sql: "?, ?, ?, ?"
+    // Build insert_placeholders_sql: "?, ?, ?, ?" (SQLite)
     const insert_placeholders_sql = comptime blk: {
         var buf: []const u8 = "";
         for (0..insert_cols_count) |i| {
@@ -121,7 +150,17 @@ pub fn define(comptime T: type, comptime opts: SchemaOpts) type {
         break :blk buf;
     };
 
-    // Build CREATE TABLE SQL
+    // Build insert_placeholders_pg_sql: "$1, $2, $3, $4" (PostgreSQL)
+    const insert_placeholders_pg_sql = comptime blk: {
+        var buf: []const u8 = "";
+        for (0..insert_cols_count) |i| {
+            if (i > 0) buf = buf ++ ", ";
+            buf = buf ++ "$" ++ intToStr(i + 1);
+        }
+        break :blk buf;
+    };
+
+    // Build CREATE TABLE SQL (SQLite)
     // Note: SQLite requires INTEGER (not BIGINT) for PRIMARY KEY AUTOINCREMENT.
     // SQLite's INTEGER is always 64-bit so this is correct for i64 PKs.
     const create_table_sql: [:0]const u8 = comptime blk: {
@@ -141,6 +180,24 @@ pub fn define(comptime T: type, comptime opts: SchemaOpts) type {
         break :blk sql ++ "";
     };
 
+    // Build CREATE TABLE SQL (PostgreSQL)
+    const create_table_pg_sql: [:0]const u8 = comptime blk: {
+        var sql: []const u8 = "CREATE TABLE IF NOT EXISTS " ++ opts.table ++ " (";
+        for (struct_fields, 0..) |f, i| {
+            if (i > 0) sql = sql ++ ", ";
+            const is_pk = std.mem.eql(u8, f.name, opts.primary_key);
+            const sql_t = zigTypeToSql(f.type);
+            if (is_pk and (sql_t == .integer or sql_t == .bigint)) {
+                sql = sql ++ f.name ++ " BIGSERIAL PRIMARY KEY";
+            } else {
+                sql = sql ++ f.name ++ " " ++ sqlTypeStrPg(sql_t);
+                if (is_pk) sql = sql ++ " PRIMARY KEY";
+            }
+        }
+        sql = sql ++ ")";
+        break :blk sql ++ "";
+    };
+
     return struct {
         pub const Table: [:0]const u8 = opts.table;
         pub const PrimaryKey: []const u8 = opts.primary_key;
@@ -152,8 +209,17 @@ pub fn define(comptime T: type, comptime opts: SchemaOpts) type {
         pub const columns: []const u8 = columns_sql;
         pub const insert_columns: []const u8 = insert_columns_sql;
         pub const insert_placeholders: []const u8 = insert_placeholders_sql;
+        pub const insert_placeholders_pg: []const u8 = insert_placeholders_pg_sql;
         pub const insert_field_count: usize = insert_cols_count;
         pub const create_table: [:0]const u8 = create_table_sql;
+        pub const create_table_pg: [:0]const u8 = create_table_pg_sql;
+
+        pub fn createTable(comptime d: Dialect) [:0]const u8 {
+            return switch (d) {
+                .sqlite => create_table_sql,
+                .postgres => create_table_pg_sql,
+            };
+        }
     };
 }
 
@@ -228,4 +294,28 @@ test "INSERT columns" {
 test "meta helper" {
     const M = meta(TestUser);
     try std.testing.expectEqualStrings("users", M.Table);
+}
+
+test "CREATE TABLE SQL (postgres)" {
+    const M = TestUser.Meta;
+    const expected = "CREATE TABLE IF NOT EXISTS users (id BIGSERIAL PRIMARY KEY, name TEXT, email TEXT, inserted_at BIGINT, updated_at BIGINT)";
+    try std.testing.expectEqualStrings(expected, M.create_table_pg);
+}
+
+test "INSERT placeholders (postgres)" {
+    const M = TestUser.Meta;
+    try std.testing.expectEqualStrings("$1, $2, $3, $4", M.insert_placeholders_pg);
+}
+
+test "createTable dispatches by dialect" {
+    const M = TestUser.Meta;
+    try std.testing.expectEqualStrings(M.create_table, M.createTable(.sqlite));
+    try std.testing.expectEqualStrings(M.create_table_pg, M.createTable(.postgres));
+}
+
+test "intToStr" {
+    try std.testing.expectEqualStrings("1", intToStr(1));
+    try std.testing.expectEqualStrings("10", intToStr(10));
+    try std.testing.expectEqualStrings("42", intToStr(42));
+    try std.testing.expectEqualStrings("0", intToStr(0));
 }
