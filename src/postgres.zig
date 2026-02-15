@@ -61,9 +61,22 @@ pub const ResultSet = struct {
         var param_values: [64]?[*]const u8 = undefined;
         var param_lengths: [64]c_int = undefined;
 
+        // libpq text format requires null-terminated C strings and ignores
+        // paramLengths, so we must null-terminate each value.
+        var nul_buf: [4096]u8 = undefined;
+        var nul_pos: usize = 0;
+
         for (bind_values, 0..) |val, i| {
             if (val) |v| {
-                param_values[i] = v.ptr;
+                if (nul_pos + v.len + 1 <= nul_buf.len) {
+                    @memcpy(nul_buf[nul_pos .. nul_pos + v.len], v);
+                    nul_buf[nul_pos + v.len] = 0;
+                    param_values[i] = @ptrCast(&nul_buf[nul_pos]);
+                    nul_pos += v.len + 1;
+                } else {
+                    // Fallback: value too large for stack buffer
+                    param_values[i] = v.ptr;
+                }
                 param_lengths[i] = @intCast(v.len);
             } else {
                 param_values[i] = null;
@@ -139,9 +152,22 @@ pub const ExecResult = struct {
         var param_values: [64]?[*]const u8 = undefined;
         var param_lengths: [64]c_int = undefined;
 
+        // libpq text format requires null-terminated C strings and ignores
+        // paramLengths, so we must null-terminate each value.
+        var nul_buf: [4096]u8 = undefined;
+        var nul_pos: usize = 0;
+
         for (bind_values, 0..) |val, i| {
             if (val) |v| {
-                param_values[i] = v.ptr;
+                if (nul_pos + v.len + 1 <= nul_buf.len) {
+                    @memcpy(nul_buf[nul_pos .. nul_pos + v.len], v);
+                    nul_buf[nul_pos + v.len] = 0;
+                    param_values[i] = @ptrCast(&nul_buf[nul_pos]);
+                    nul_pos += v.len + 1;
+                } else {
+                    // Fallback: value too large for stack buffer
+                    param_values[i] = v.ptr;
+                }
                 param_lengths[i] = @intCast(v.len);
             } else {
                 param_values[i] = null;

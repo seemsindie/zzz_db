@@ -15,6 +15,7 @@ pub const sqlite = @import("sqlite.zig");
 pub const SqliteError = sqlite.SqliteError;
 
 const db_options = @import("db_options");
+pub const postgres_enabled = db_options.postgres_enabled;
 pub const postgres = if (db_options.postgres_enabled) @import("postgres.zig") else struct {};
 
 // Generic types
@@ -42,6 +43,12 @@ pub const SqlitePool = Pool(sqlite);
 pub const SqlitePoolConfig = PoolConfig(sqlite);
 pub const SqliteRepo = Repo(sqlite);
 pub const SqliteTransaction = Transaction(sqlite);
+
+pub const PgConnection = if (db_options.postgres_enabled) Connection(postgres) else struct {};
+pub const PgPool = if (db_options.postgres_enabled) Pool(postgres) else struct {};
+pub const PgPoolConfig = if (db_options.postgres_enabled) PoolConfig(postgres) else struct {};
+pub const PgRepo = if (db_options.postgres_enabled) Repo(postgres) else struct {};
+pub const PgTransaction = if (db_options.postgres_enabled) Transaction(postgres) else struct {};
 
 pub const version = "0.2.0";
 
