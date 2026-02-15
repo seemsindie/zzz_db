@@ -105,6 +105,7 @@ pub fn Pool(comptime Backend: type) type {
             if (self.connections[index].state == .in_transaction) {
                 self.connections[index].exec("ROLLBACK") catch {};
                 self.connections[index].state = .connected;
+                self.connections[index].savepoint_depth = 0;
             }
 
             self.in_use[index] = false;

@@ -35,10 +35,24 @@ pub const FieldInfo = struct {
     is_timestamp: bool,
 };
 
+pub const AssociationType = enum { has_many, has_one, belongs_to, many_to_many };
+
+pub const AssociationDef = struct {
+    name: []const u8,
+    assoc_type: AssociationType,
+    related_table: []const u8,
+    foreign_key: []const u8,
+    join_table: []const u8 = "",
+    join_fk: []const u8 = "",
+    join_assoc_fk: []const u8 = "",
+};
+
 pub const SchemaOpts = struct {
     table: [:0]const u8,
     primary_key: []const u8 = "id",
     timestamps: bool = true,
+    associations: []const AssociationDef = &.{},
+    virtual_fields: []const []const u8 = &.{},
 };
 
 pub fn zigTypeToSql(comptime T: type) SqlType {
@@ -101,6 +115,14 @@ pub fn define(comptime T: type, comptime opts: SchemaOpts) type {
             const is_nullable = @typeInfo(f.type) == .optional;
             const sql_t = zigTypeToSql(f.type);
 
+            // Check if this is a virtual field
+            var is_virtual = false;
+            for (opts.virtual_fields) |vf| {
+                if (std.mem.eql(u8, f.name, vf)) {
+                    is_virtual = true;
+                }
+            }
+
             fields[i] = .{
                 .name = f.name,
                 .sql_type = sql_t,
@@ -112,7 +134,7 @@ pub fn define(comptime T: type, comptime opts: SchemaOpts) type {
             field_names_arr[i] = f.name;
             columns_parts[i] = f.name;
 
-            if (!is_pk) {
+            if (!is_pk and !is_virtual) {
                 insert_col_parts[insert_cols_count] = f.name;
                 insert_placeholder_parts[insert_cols_count] = "?";
                 insert_cols_count += 1;
@@ -213,6 +235,8 @@ pub fn define(comptime T: type, comptime opts: SchemaOpts) type {
         pub const insert_field_count: usize = insert_cols_count;
         pub const create_table: [:0]const u8 = create_table_sql;
         pub const create_table_pg: [:0]const u8 = create_table_pg_sql;
+        pub const associations: []const AssociationDef = opts.associations;
+        pub const virtual_fields: []const []const u8 = opts.virtual_fields;
 
         pub fn createTable(comptime d: Dialect) [:0]const u8 {
             return switch (d) {
@@ -318,4 +342,58 @@ test "intToStr" {
     try std.testing.expectEqualStrings("10", intToStr(10));
     try std.testing.expectEqualStrings("42", intToStr(42));
     try std.testing.expectEqualStrings("0", intToStr(0));
+}
+
+// ── 5g: Association and virtual field tests ───────────────────────────
+
+const TestUserWithAssoc = struct {
+    id: i64,
+    name: []const u8,
+    email: []const u8,
+    inserted_at: i64 = 0,
+    updated_at: i64 = 0,
+
+    pub const Meta = define(@This(), .{
+        .table = "users",
+        .primary_key = "id",
+        .timestamps = true,
+        .associations = &.{
+            .{ .name = "posts", .assoc_type = .has_many, .related_table = "posts", .foreign_key = "user_id" },
+            .{ .name = "profile", .assoc_type = .has_one, .related_table = "profiles", .foreign_key = "user_id" },
+        },
+    });
+};
+
+test "association metadata accessible at comptime" {
+    const M = TestUserWithAssoc.Meta;
+    try std.testing.expectEqual(@as(usize, 2), M.associations.len);
+    try std.testing.expectEqualStrings("posts", M.associations[0].name);
+    try std.testing.expectEqual(AssociationType.has_many, M.associations[0].assoc_type);
+    try std.testing.expectEqualStrings("posts", M.associations[0].related_table);
+    try std.testing.expectEqualStrings("user_id", M.associations[0].foreign_key);
+    try std.testing.expectEqualStrings("profile", M.associations[1].name);
+    try std.testing.expectEqual(AssociationType.has_one, M.associations[1].assoc_type);
+}
+
+const TestWithVirtual = struct {
+    id: i64,
+    name: []const u8,
+    full_name: []const u8 = "",
+
+    pub const Meta = define(@This(), .{
+        .table = "items",
+        .primary_key = "id",
+        .timestamps = false,
+        .virtual_fields = &.{"full_name"},
+    });
+};
+
+test "virtual field excluded from insert_columns" {
+    const M = TestWithVirtual.Meta;
+    // "full_name" is virtual, so insert_columns should only have "name"
+    try std.testing.expectEqualStrings("name", M.insert_columns);
+    // But columns (for SELECT) should still include it
+    try std.testing.expectEqualStrings("id, name, full_name", M.columns);
+    try std.testing.expectEqual(@as(usize, 1), M.virtual_fields.len);
+    try std.testing.expectEqualStrings("full_name", M.virtual_fields[0]);
 }

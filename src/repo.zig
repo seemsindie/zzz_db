@@ -3,11 +3,16 @@ const backend_mod = @import("backend.zig");
 const schema_mod = @import("schema.zig");
 const query_mod = @import("query.zig");
 const pool_mod = @import("pool.zig");
+const transaction_mod = @import("transaction.zig");
+const connection_mod = @import("connection.zig");
 const sqlite = @import("sqlite.zig");
 
 pub fn Repo(comptime Backend: type) type {
     comptime backend_mod.validate(Backend);
     const PoolType = pool_mod.Pool(Backend);
+    const PooledConnectionType = pool_mod.PooledConnection(Backend);
+    const Txn = transaction_mod.Transaction(Backend);
+    const Conn = connection_mod.Connection(Backend);
 
     return struct {
         const Self = @This();
@@ -248,6 +253,182 @@ pub fn Repo(comptime Backend: type) type {
             }
             return false;
         }
+
+        /// Execute an aggregate function on a query and return the result as f64.
+        pub fn aggregate(self: Self, comptime T: type, q: query_mod.Query(T), agg: query_mod.Aggregate, field: []const u8, allocator: std.mem.Allocator) !?f64 {
+            const sql_result = try q.toAggregateSql(agg, field, allocator, Backend.dialect);
+            defer allocator.free(sql_result.sql);
+            defer allocator.free(sql_result.bind_values);
+
+            const sql_z = try allocator.dupeZ(u8, sql_result.sql);
+            defer allocator.free(sql_z);
+
+            var pc = try self.pool.checkout();
+            defer pc.release();
+
+            var rs = try Backend.ResultSet.query(&pc.conn.db, sql_z, sql_result.bind_values);
+            defer rs.deinit();
+
+            if (try rs.next()) {
+                if (rs.columnIsNull(0)) return null;
+                return rs.columnDouble(0);
+            }
+            return null;
+        }
+
+        /// Convenience: count records matching a query.
+        pub fn count(self: Self, comptime T: type, q: query_mod.Query(T), allocator: std.mem.Allocator) !i64 {
+            const result = try self.aggregate(T, q, .count, "*", allocator);
+            return if (result) |v| @intFromFloat(v) else 0;
+        }
+
+        /// Transaction handle for manual transaction management.
+        pub const TransactionHandle = struct {
+            pc: PooledConnectionType,
+
+            pub fn commit(self: *TransactionHandle) !void {
+                try Txn.commit(self.pc.conn);
+            }
+
+            pub fn rollback(self: *TransactionHandle) void {
+                Txn.rollback(self.pc.conn) catch {};
+            }
+
+            pub fn release(self: *TransactionHandle) void {
+                self.pc.release();
+            }
+
+            pub fn conn(self: *TransactionHandle) *Conn {
+                return self.pc.conn;
+            }
+        };
+
+        /// Begin a transaction and return a handle for manual commit/rollback.
+        pub fn beginTransaction(self: Self) !TransactionHandle {
+            var pc = try self.pool.checkout();
+            errdefer pc.release();
+            try Txn.begin(pc.conn);
+            return .{ .pc = pc };
+        }
+
+        /// Preload associated records for a set of parent records.
+        /// Returns a slice of slices, parallel to parents, containing children grouped by FK.
+        pub fn preload(
+            self: Self,
+            comptime T: type,
+            comptime ChildT: type,
+            comptime assoc_name: []const u8,
+            parents: []T,
+            allocator: std.mem.Allocator,
+        ) ![][]ChildT {
+            const ParentM = schema_mod.meta(T);
+            const ChildM = schema_mod.meta(ChildT);
+
+            // Find the association definition
+            const assoc = comptime blk: {
+                for (ParentM.associations) |a| {
+                    if (std.mem.eql(u8, a.name, assoc_name)) {
+                        break :blk a;
+                    }
+                }
+                @compileError("Association '" ++ assoc_name ++ "' not found on " ++ @typeName(T));
+            };
+
+            if (parents.len == 0) {
+                return try allocator.alloc([]ChildT, 0);
+            }
+
+            // Build SQL: SELECT * FROM child_table WHERE fk IN (?, ?, ...)
+            var sql_parts: std.ArrayList(u8) = .empty;
+            defer sql_parts.deinit(allocator);
+
+            try sql_parts.appendSlice(allocator, "SELECT ");
+            try sql_parts.appendSlice(allocator, ChildM.columns);
+            try sql_parts.appendSlice(allocator, " FROM ");
+            try sql_parts.appendSlice(allocator, assoc.related_table);
+            try sql_parts.appendSlice(allocator, " WHERE ");
+            try sql_parts.appendSlice(allocator, assoc.foreign_key);
+            try sql_parts.appendSlice(allocator, " IN (");
+
+            var bind_list: std.ArrayList(?[]const u8) = .empty;
+            defer bind_list.deinit(allocator);
+
+            // We need buffers for PK values
+            var pk_bufs = try allocator.alloc([64]u8, parents.len);
+            defer allocator.free(pk_bufs);
+
+            for (parents, 0..) |parent, i| {
+                if (i > 0) try sql_parts.appendSlice(allocator, ", ");
+                if (Backend.dialect == .postgres) {
+                    try sql_parts.append(allocator, '$');
+                    var idx_buf: [16]u8 = undefined;
+                    const idx_str = std.fmt.bufPrint(&idx_buf, "{d}", .{i + 1}) catch "0";
+                    try sql_parts.appendSlice(allocator, idx_str);
+                } else {
+                    try sql_parts.append(allocator, '?');
+                }
+                const pk_val = @field(parent, ParentM.PrimaryKey);
+                const pk_str = fieldToText(&pk_bufs[i], @TypeOf(pk_val), pk_val);
+                try bind_list.append(allocator, pk_str);
+            }
+            try sql_parts.append(allocator, ')');
+
+            const sql_z = try allocator.dupeZ(u8, sql_parts.items);
+            defer allocator.free(sql_z);
+
+            const bind_vals = try bind_list.toOwnedSlice(allocator);
+            defer allocator.free(bind_vals);
+
+            var pc = try self.pool.checkout();
+            defer pc.release();
+
+            var rs = try Backend.ResultSet.query(&pc.conn.db, sql_z, bind_vals);
+            defer rs.deinit();
+
+            // Collect all children
+            var all_children: std.ArrayList(ChildT) = .empty;
+            defer {
+                // Don't free strings here - they're owned by the result slices
+            }
+            errdefer {
+                for (all_children.items) |*child| {
+                    freeStructStrings(ChildT, child, allocator);
+                }
+                all_children.deinit(allocator);
+            }
+
+            while (try rs.next()) {
+                const row = try mapRow(ChildT, Backend, &rs, allocator);
+                try all_children.append(allocator, row);
+            }
+
+            // Group children by parent
+            var result = try allocator.alloc([]ChildT, parents.len);
+            for (result) |*slot| {
+                slot.* = &.{};
+            }
+
+            // For each parent, find matching children
+            for (parents, 0..) |parent, pi| {
+                const parent_pk = @field(parent, ParentM.PrimaryKey);
+
+                var group: std.ArrayList(ChildT) = .empty;
+                errdefer group.deinit(allocator);
+
+                for (all_children.items) |child| {
+                    const child_fk = @field(child, assoc.foreign_key);
+                    if (child_fk == parent_pk) {
+                        try group.append(allocator, child);
+                    }
+                }
+
+                result[pi] = try group.toOwnedSlice(allocator);
+            }
+
+            all_children.deinit(allocator);
+
+            return result;
+        }
     };
 }
 
@@ -364,6 +545,18 @@ pub fn freeOne(comptime T: type, item: *T, allocator: std.mem.Allocator) void {
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
+const TestPost = struct {
+    id: i64,
+    title: []const u8,
+    user_id: i64 = 0,
+
+    pub const Meta = schema_mod.define(@This(), .{
+        .table = "posts",
+        .primary_key = "id",
+        .timestamps = false,
+    });
+};
+
 const TestUser = struct {
     id: i64,
     name: []const u8,
@@ -375,6 +568,9 @@ const TestUser = struct {
         .table = "users",
         .primary_key = "id",
         .timestamps = true,
+        .associations = &.{
+            .{ .name = "posts", .assoc_type = .has_many, .related_table = "posts", .foreign_key = "user_id" },
+        },
     });
 };
 
@@ -388,6 +584,18 @@ const TestContext = struct {
         // Create table
         var pc = try pool.checkout();
         try pc.conn.exec("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, email TEXT, inserted_at BIGINT, updated_at BIGINT)");
+        pc.release();
+
+        return .{ .pool = pool };
+    }
+
+    fn setupWithPosts() !TestContext {
+        var pool = try pool_mod.Pool(sqlite).init(.{ .size = 1 });
+        errdefer pool.deinit();
+
+        var pc = try pool.checkout();
+        try pc.conn.exec("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, email TEXT, inserted_at BIGINT, updated_at BIGINT)");
+        try pc.conn.exec("CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, user_id BIGINT)");
         pc.release();
 
         return .{ .pool = pool };
@@ -544,4 +752,136 @@ test "get null for missing ID" {
 
     const fetched = try r.get(TestUser, 99999, std.testing.allocator);
     try std.testing.expect(fetched == null);
+}
+
+// ── 5e: Repo extension tests ──────────────────────────────────────────
+
+test "count returns correct number" {
+    var ctx = try TestContext.setup();
+    defer ctx.deinit();
+    var r = ctx.repo();
+
+    var ins1 = try r.insert(TestUser, .{ .id = 0, .name = "Alice", .email = "a@e.com" }, std.testing.allocator);
+    defer freeOne(TestUser, &ins1, std.testing.allocator);
+    var ins2 = try r.insert(TestUser, .{ .id = 0, .name = "Bob", .email = "b@e.com" }, std.testing.allocator);
+    defer freeOne(TestUser, &ins2, std.testing.allocator);
+    var ins3 = try r.insert(TestUser, .{ .id = 0, .name = "Carol", .email = "c@e.com" }, std.testing.allocator);
+    defer freeOne(TestUser, &ins3, std.testing.allocator);
+
+    const q = query_mod.Query(TestUser).init();
+    const c = try r.count(TestUser, q, std.testing.allocator);
+    try std.testing.expectEqual(@as(i64, 3), c);
+
+    const q2 = query_mod.Query(TestUser).init().where("name", .eq, "Alice");
+    const c2 = try r.count(TestUser, q2, std.testing.allocator);
+    try std.testing.expectEqual(@as(i64, 1), c2);
+}
+
+test "aggregate with sum" {
+    var ctx = try TestContext.setup();
+    defer ctx.deinit();
+    var r = ctx.repo();
+
+    var ins1 = try r.insert(TestUser, .{ .id = 0, .name = "Alice", .email = "a@e.com", .inserted_at = 10 }, std.testing.allocator);
+    defer freeOne(TestUser, &ins1, std.testing.allocator);
+    var ins2 = try r.insert(TestUser, .{ .id = 0, .name = "Bob", .email = "b@e.com", .inserted_at = 20 }, std.testing.allocator);
+    defer freeOne(TestUser, &ins2, std.testing.allocator);
+
+    const q = query_mod.Query(TestUser).init();
+    const result = try r.aggregate(TestUser, q, .sum, "inserted_at", std.testing.allocator);
+    try std.testing.expectApproxEqAbs(@as(f64, 30.0), result.?, 0.001);
+}
+
+test "beginTransaction commit and rollback" {
+    var ctx = try TestContext.setup();
+    defer ctx.deinit();
+    var r = ctx.repo();
+
+    // Commit path
+    {
+        var txn = try r.beginTransaction();
+        defer txn.release();
+        try txn.conn().exec("INSERT INTO users (name, email, inserted_at, updated_at) VALUES ('TxnUser', 'txn@e.com', 0, 0)");
+        try txn.commit();
+    }
+
+    const q1 = query_mod.Query(TestUser).init().where("name", .eq, "TxnUser");
+    try std.testing.expect(try r.exists(TestUser, q1, std.testing.allocator));
+
+    // Rollback path
+    {
+        var txn = try r.beginTransaction();
+        defer txn.release();
+        try txn.conn().exec("INSERT INTO users (name, email, inserted_at, updated_at) VALUES ('RollbackUser', 'rb@e.com', 0, 0)");
+        txn.rollback();
+    }
+
+    const q2 = query_mod.Query(TestUser).init().where("name", .eq, "RollbackUser");
+    try std.testing.expect(!(try r.exists(TestUser, q2, std.testing.allocator)));
+}
+
+// ── 5g: Preload tests ─────────────────────────────────────────────────
+
+test "preload has_many: correct grouping" {
+    var ctx = try TestContext.setupWithPosts();
+    defer ctx.deinit();
+    var r = ctx.repo();
+
+    // Insert 2 users
+    var user_alice = try r.insert(TestUser, .{ .id = 0, .name = "Alice", .email = "a@e.com" }, std.testing.allocator);
+    defer freeOne(TestUser, &user_alice, std.testing.allocator);
+    var user_bob = try r.insert(TestUser, .{ .id = 0, .name = "Bob", .email = "b@e.com" }, std.testing.allocator);
+    defer freeOne(TestUser, &user_bob, std.testing.allocator);
+
+    // Insert 3 posts: 2 for Alice, 1 for Bob
+    var post_a1 = try r.insert(TestPost, .{ .id = 0, .title = "Alice Post 1", .user_id = user_alice.id }, std.testing.allocator);
+    defer freeOne(TestPost, &post_a1, std.testing.allocator);
+    var post_a2 = try r.insert(TestPost, .{ .id = 0, .title = "Alice Post 2", .user_id = user_alice.id }, std.testing.allocator);
+    defer freeOne(TestPost, &post_a2, std.testing.allocator);
+    var post_b1 = try r.insert(TestPost, .{ .id = 0, .title = "Bob Post 1", .user_id = user_bob.id }, std.testing.allocator);
+    defer freeOne(TestPost, &post_b1, std.testing.allocator);
+
+    // Fetch all users
+    const q = query_mod.Query(TestUser).init().orderBy("id", .asc);
+    const users = try r.all(TestUser, q, std.testing.allocator);
+    defer freeAll(TestUser, users, std.testing.allocator);
+
+    // Preload posts
+    const posts_by_user = try r.preload(TestUser, TestPost, "posts", users, std.testing.allocator);
+    defer {
+        for (posts_by_user) |posts| {
+            for (posts) |*post| {
+                var mp = post.*;
+                freeOne(TestPost, &mp, std.testing.allocator);
+            }
+            std.testing.allocator.free(posts);
+        }
+        std.testing.allocator.free(posts_by_user);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), posts_by_user.len);
+    try std.testing.expectEqual(@as(usize, 2), posts_by_user[0].len); // Alice has 2 posts
+    try std.testing.expectEqual(@as(usize, 1), posts_by_user[1].len); // Bob has 1 post
+}
+
+test "preload with empty results" {
+    var ctx = try TestContext.setupWithPosts();
+    defer ctx.deinit();
+    var r = ctx.repo();
+
+    // Insert a user with no posts
+    var lonely = try r.insert(TestUser, .{ .id = 0, .name = "Lonely", .email = "l@e.com" }, std.testing.allocator);
+    defer freeOne(TestUser, &lonely, std.testing.allocator);
+
+    const users = &[_]TestUser{lonely};
+    const posts_by_user = try r.preload(TestUser, TestPost, "posts", @constCast(users), std.testing.allocator);
+    defer {
+        for (posts_by_user) |posts| {
+            std.testing.allocator.free(posts);
+        }
+        std.testing.allocator.free(posts_by_user);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), posts_by_user.len);
+    try std.testing.expectEqual(@as(usize, 0), posts_by_user[0].len);
 }

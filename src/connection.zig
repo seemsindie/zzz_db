@@ -17,6 +17,7 @@ pub fn Connection(comptime Backend: type) type {
         db: Backend.Db,
         config: Backend.Config,
         state: ConnectionState,
+        savepoint_depth: u16 = 0,
 
         pub fn open(config: Backend.Config) !Self {
             var db = try Backend.Db.open(config.database);

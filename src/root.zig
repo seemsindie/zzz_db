@@ -26,12 +26,29 @@ pub const PoolConfig = @import("pool.zig").PoolConfig;
 pub const PooledConnection = @import("pool.zig").PooledConnection;
 pub const Repo = @import("repo.zig").Repo;
 pub const Transaction = @import("transaction.zig").Transaction;
+pub const IsolationLevel = @import("transaction.zig").IsolationLevel;
 
-// Schema & Query (unchanged)
+// Schema & Query
 pub const Schema = @import("schema.zig");
+pub const AssociationType = Schema.AssociationType;
+pub const AssociationDef = Schema.AssociationDef;
 pub const Query = @import("query.zig").Query;
 pub const Op = @import("query.zig").Op;
 pub const Order = @import("query.zig").Order;
+pub const JoinType = @import("query.zig").JoinType;
+pub const Aggregate = @import("query.zig").Aggregate;
+
+// Changeset
+pub const Changeset = @import("changeset.zig").Changeset;
+
+// Migration
+pub const Migration = @import("migration.zig");
+pub const MigrationDef = Migration.MigrationDef;
+pub const MigrationRunner = Migration.Runner;
+pub const MigrationContext = Migration.MigrationContext;
+pub const ColumnDef = Migration.ColumnDef;
+pub const ColumnType = Migration.ColumnType;
+pub const MigrationStatus = Migration.MigrationStatus;
 
 // Helpers
 pub const freeAll = @import("repo.zig").freeAll;
@@ -43,12 +60,16 @@ pub const SqlitePool = Pool(sqlite);
 pub const SqlitePoolConfig = PoolConfig(sqlite);
 pub const SqliteRepo = Repo(sqlite);
 pub const SqliteTransaction = Transaction(sqlite);
+pub const SqliteMigrationRunner = MigrationRunner(sqlite);
+pub const SqliteMigrationDef = MigrationDef(sqlite);
 
 pub const PgConnection = if (db_options.postgres_enabled) Connection(postgres) else struct {};
 pub const PgPool = if (db_options.postgres_enabled) Pool(postgres) else struct {};
 pub const PgPoolConfig = if (db_options.postgres_enabled) PoolConfig(postgres) else struct {};
 pub const PgRepo = if (db_options.postgres_enabled) Repo(postgres) else struct {};
 pub const PgTransaction = if (db_options.postgres_enabled) Transaction(postgres) else struct {};
+pub const PgMigrationRunner = if (db_options.postgres_enabled) MigrationRunner(postgres) else struct {};
+pub const PgMigrationDef = if (db_options.postgres_enabled) MigrationDef(postgres) else struct {};
 
 pub const version = "0.2.0";
 
