@@ -18,10 +18,12 @@ pub fn build(b: *std.Build) void {
     mod.addImport("db_options", db_options.createModule());
 
     if (sqlite_enabled) {
-        mod.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/include" });
         mod.linkSystemLibrary("sqlite3", .{});
-        mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/lib" });
         mod.link_libc = true;
+        if (target.result.os.tag == .macos) {
+            mod.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/include" });
+            mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/lib" });
+        }
     }
 
     const mod_tests = b.addTest(.{
@@ -29,10 +31,12 @@ pub fn build(b: *std.Build) void {
     });
 
     if (sqlite_enabled) {
-        mod_tests.root_module.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/include" });
         mod_tests.root_module.linkSystemLibrary("sqlite3", .{});
-        mod_tests.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/lib" });
         mod_tests.root_module.link_libc = true;
+        if (target.result.os.tag == .macos) {
+            mod_tests.root_module.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/include" });
+            mod_tests.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/lib" });
+        }
     }
 
     const run_mod_tests = b.addRunArtifact(mod_tests);
