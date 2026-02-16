@@ -311,6 +311,56 @@ pub fn Repo(comptime Backend: type) type {
             return .{ .pc = pc };
         }
 
+        // ── Raw query methods ──────────────────────────────────────────
+
+        /// Execute raw SQL and return all matching rows mapped to T.
+        /// Column order in the SELECT must match the struct field order.
+        pub fn rawAll(self: Self, comptime T: type, sql: [:0]const u8, bind_values: []const ?[]const u8, allocator: std.mem.Allocator) ![]T {
+            var pc = try self.pool.checkout();
+            defer pc.release();
+
+            var rs = try Backend.ResultSet.query(&pc.conn.db, sql, bind_values);
+            defer rs.deinit();
+
+            var results: std.ArrayList(T) = .empty;
+            errdefer {
+                for (results.items) |*item| {
+                    freeStructStrings(T, item, allocator);
+                }
+                results.deinit(allocator);
+            }
+
+            while (try rs.next()) {
+                const row = try mapRow(T, Backend, &rs, allocator);
+                try results.append(allocator, row);
+            }
+
+            return try results.toOwnedSlice(allocator);
+        }
+
+        /// Execute raw SQL and return the first matching row mapped to T, or null.
+        /// Column order in the SELECT must match the struct field order.
+        pub fn rawOne(self: Self, comptime T: type, sql: [:0]const u8, bind_values: []const ?[]const u8, allocator: std.mem.Allocator) !?T {
+            var pc = try self.pool.checkout();
+            defer pc.release();
+
+            var rs = try Backend.ResultSet.query(&pc.conn.db, sql, bind_values);
+            defer rs.deinit();
+
+            if (try rs.next()) {
+                return try mapRow(T, Backend, &rs, allocator);
+            }
+            return null;
+        }
+
+        /// Execute raw SQL (INSERT/UPDATE/DELETE) and return the result.
+        pub fn rawExec(self: Self, sql: [:0]const u8, bind_values: []const ?[]const u8) !Backend.ExecResult {
+            var pc = try self.pool.checkout();
+            defer pc.release();
+
+            return try Backend.ExecResult.exec(&pc.conn.db, sql, bind_values);
+        }
+
         /// Preload associated records for a set of parent records.
         /// Returns a slice of slices, parallel to parents, containing children grouped by FK.
         pub fn preload(
@@ -862,6 +912,110 @@ test "preload has_many: correct grouping" {
     try std.testing.expectEqual(@as(usize, 2), posts_by_user.len);
     try std.testing.expectEqual(@as(usize, 2), posts_by_user[0].len); // Alice has 2 posts
     try std.testing.expectEqual(@as(usize, 1), posts_by_user[1].len); // Bob has 1 post
+}
+
+test "rawAll returns mapped rows" {
+    var ctx = try TestContext.setup();
+    defer ctx.deinit();
+    var r = ctx.repo();
+
+    var ins1 = try r.insert(TestUser, .{ .id = 0, .name = "Alice", .email = "a@e.com" }, std.testing.allocator);
+    defer freeOne(TestUser, &ins1, std.testing.allocator);
+    var ins2 = try r.insert(TestUser, .{ .id = 0, .name = "Bob", .email = "b@e.com" }, std.testing.allocator);
+    defer freeOne(TestUser, &ins2, std.testing.allocator);
+
+    const users = try r.rawAll(
+        TestUser,
+        "SELECT id, name, email, inserted_at, updated_at FROM users ORDER BY id",
+        &.{},
+        std.testing.allocator,
+    );
+    defer freeAll(TestUser, users, std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), users.len);
+    try std.testing.expectEqualStrings("Alice", users[0].name);
+    try std.testing.expectEqualStrings("Bob", users[1].name);
+}
+
+test "rawAll with bind params" {
+    var ctx = try TestContext.setup();
+    defer ctx.deinit();
+    var r = ctx.repo();
+
+    var ins1 = try r.insert(TestUser, .{ .id = 0, .name = "Alice", .email = "a@e.com" }, std.testing.allocator);
+    defer freeOne(TestUser, &ins1, std.testing.allocator);
+    var ins2 = try r.insert(TestUser, .{ .id = 0, .name = "Bob", .email = "b@e.com" }, std.testing.allocator);
+    defer freeOne(TestUser, &ins2, std.testing.allocator);
+
+    const users = try r.rawAll(
+        TestUser,
+        "SELECT id, name, email, inserted_at, updated_at FROM users WHERE name = ?",
+        &.{"Alice"},
+        std.testing.allocator,
+    );
+    defer freeAll(TestUser, users, std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), users.len);
+    try std.testing.expectEqualStrings("Alice", users[0].name);
+}
+
+test "rawOne returns first row" {
+    var ctx = try TestContext.setup();
+    defer ctx.deinit();
+    var r = ctx.repo();
+
+    var ins1 = try r.insert(TestUser, .{ .id = 0, .name = "Alice", .email = "a@e.com" }, std.testing.allocator);
+    defer freeOne(TestUser, &ins1, std.testing.allocator);
+
+    var user = (try r.rawOne(
+        TestUser,
+        "SELECT id, name, email, inserted_at, updated_at FROM users WHERE id = ?",
+        &.{"1"},
+        std.testing.allocator,
+    )).?;
+    defer freeOne(TestUser, &user, std.testing.allocator);
+
+    try std.testing.expectEqualStrings("Alice", user.name);
+}
+
+test "rawOne returns null for no match" {
+    var ctx = try TestContext.setup();
+    defer ctx.deinit();
+    var r = ctx.repo();
+
+    const user = try r.rawOne(
+        TestUser,
+        "SELECT id, name, email, inserted_at, updated_at FROM users WHERE id = ?",
+        &.{"99999"},
+        std.testing.allocator,
+    );
+    try std.testing.expect(user == null);
+}
+
+test "rawExec inserts and returns result" {
+    var ctx = try TestContext.setup();
+    defer ctx.deinit();
+    var r = ctx.repo();
+
+    var er = try r.rawExec(
+        "INSERT INTO users (name, email, inserted_at, updated_at) VALUES (?, ?, ?, ?)",
+        &.{ "RawUser", "raw@e.com", "0", "0" },
+    );
+    defer er.deinit();
+
+    try std.testing.expect(er.lastInsertId() > 0);
+    try std.testing.expectEqual(@as(i32, 1), er.rowsAffected());
+
+    // Verify it was inserted
+    var user = (try r.rawOne(
+        TestUser,
+        "SELECT id, name, email, inserted_at, updated_at FROM users WHERE name = ?",
+        &.{"RawUser"},
+        std.testing.allocator,
+    )).?;
+    defer freeOne(TestUser, &user, std.testing.allocator);
+
+    try std.testing.expectEqualStrings("RawUser", user.name);
 }
 
 test "preload with empty results" {
