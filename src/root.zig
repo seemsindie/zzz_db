@@ -54,6 +54,11 @@ pub const MigrationStatus = Migration.MigrationStatus;
 pub const freeAll = @import("repo.zig").freeAll;
 pub const freeOne = @import("repo.zig").freeOne;
 
+// Testing utilities
+pub const TestSandbox = @import("testing.zig").TestSandbox;
+pub const Factory = @import("testing.zig").Factory;
+pub const seed = @import("testing.zig").seed;
+
 // Convenience aliases — backward compatible
 pub const SqliteConnection = Connection(sqlite);
 pub const SqlitePool = Pool(sqlite);
