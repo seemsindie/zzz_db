@@ -76,7 +76,7 @@ pub const PgTransaction = if (db_options.postgres_enabled) Transaction(postgres)
 pub const PgMigrationRunner = if (db_options.postgres_enabled) MigrationRunner(postgres) else struct {};
 pub const PgMigrationDef = if (db_options.postgres_enabled) MigrationDef(postgres) else struct {};
 
-pub const version = "0.2.0";
+pub const version = "0.1.0";
 
 test {
     std.testing.refAllDecls(@This());
