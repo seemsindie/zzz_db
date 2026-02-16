@@ -1,8 +1,20 @@
 const std = @import("std");
+const backend = @import("backend.zig");
 
 pub const c = @cImport({
     @cInclude("sqlite3.h");
 });
+
+pub const dialect: backend.Dialect = .sqlite;
+
+pub const Config = struct {
+    database: [:0]const u8 = ":memory:",
+    busy_timeout_ms: c_int = 5000,
+    enable_wal: bool = true,
+    pragmas: []const [:0]const u8 = &.{
+        "PRAGMA foreign_keys = ON",
+    },
+};
 
 /// SQLITE_STATIC is defined as ((sqlite3_destructor_type)-1) in C.
 // Use SQLITE_STATIC (null) as the destructor — our bound data always outlives step().
@@ -196,6 +208,90 @@ pub const Statement = struct {
     }
 };
 
+// ── Backend Interface Types ────────────────────────────────────────────
+
+pub const ResultSet = struct {
+    stmt: Statement,
+
+    pub fn query(db: *Db, sql: [:0]const u8, bind_values: []const ?[]const u8) !ResultSet {
+        var stmt = try Statement.prepare(db, sql);
+        errdefer stmt.finalize();
+
+        for (bind_values, 0..) |val, i| {
+            if (val) |v| {
+                try stmt.bindText(@intCast(i + 1), v);
+            } else {
+                try stmt.bindNull(@intCast(i + 1));
+            }
+        }
+
+        return .{ .stmt = stmt };
+    }
+
+    pub fn next(self: *ResultSet) !bool {
+        return self.stmt.step();
+    }
+
+    pub fn columnText(self: *const ResultSet, col: c_int) ?[]const u8 {
+        return self.stmt.columnText(col);
+    }
+
+    pub fn columnInt64(self: *const ResultSet, col: c_int) i64 {
+        return self.stmt.columnInt64(col);
+    }
+
+    pub fn columnDouble(self: *const ResultSet, col: c_int) f64 {
+        return self.stmt.columnDouble(col);
+    }
+
+    pub fn columnIsNull(self: *const ResultSet, col: c_int) bool {
+        return self.stmt.columnIsNull(col);
+    }
+
+    pub fn deinit(self: *ResultSet) void {
+        self.stmt.finalize();
+    }
+};
+
+pub const ExecResult = struct {
+    db: *Db,
+    rows_affected: i32,
+    last_id: i64,
+
+    pub fn exec(db: *Db, sql: [:0]const u8, bind_values: []const ?[]const u8) !ExecResult {
+        var stmt = try Statement.prepare(db, sql);
+        defer stmt.finalize();
+
+        for (bind_values, 0..) |val, i| {
+            if (val) |v| {
+                try stmt.bindText(@intCast(i + 1), v);
+            } else {
+                try stmt.bindNull(@intCast(i + 1));
+            }
+        }
+
+        _ = try stmt.step();
+
+        return .{
+            .db = db,
+            .rows_affected = db.changes(),
+            .last_id = db.lastInsertRowId(),
+        };
+    }
+
+    pub fn lastInsertId(self: *const ExecResult) i64 {
+        return self.last_id;
+    }
+
+    pub fn rowsAffected(self: *const ExecResult) i32 {
+        return self.rows_affected;
+    }
+
+    pub fn deinit(self: *ExecResult) void {
+        _ = self;
+    }
+};
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 test "open and close in-memory db" {
@@ -305,4 +401,67 @@ test "statement reset" {
     _ = try stmt.step();
     const name2 = stmt.columnText(0);
     try std.testing.expectEqualStrings("bob", name2.?);
+}
+
+test "ResultSet query and iterate" {
+    var db = try Db.open(":memory:");
+    defer db.close();
+    try db.exec("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT, score REAL)");
+    try db.exec("INSERT INTO test (name, score) VALUES ('alice', 95.5)");
+    try db.exec("INSERT INTO test (name, score) VALUES ('bob', 87.0)");
+
+    const bind_vals: []const ?[]const u8 = &.{};
+    var rs = try ResultSet.query(&db, "SELECT id, name, score FROM test ORDER BY id", bind_vals);
+    defer rs.deinit();
+
+    try std.testing.expect(try rs.next());
+    try std.testing.expectEqual(@as(i64, 1), rs.columnInt64(0));
+    try std.testing.expectEqualStrings("alice", rs.columnText(1).?);
+    try std.testing.expectApproxEqAbs(@as(f64, 95.5), rs.columnDouble(2), 0.001);
+
+    try std.testing.expect(try rs.next());
+    try std.testing.expectEqualStrings("bob", rs.columnText(1).?);
+
+    try std.testing.expect(!(try rs.next()));
+}
+
+test "ResultSet with bind values" {
+    var db = try Db.open(":memory:");
+    defer db.close();
+    try db.exec("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)");
+    try db.exec("INSERT INTO test (name) VALUES ('alice')");
+    try db.exec("INSERT INTO test (name) VALUES ('bob')");
+
+    const bind_vals: []const ?[]const u8 = &.{"alice"};
+    var rs = try ResultSet.query(&db, "SELECT name FROM test WHERE name = ?", bind_vals);
+    defer rs.deinit();
+
+    try std.testing.expect(try rs.next());
+    try std.testing.expectEqualStrings("alice", rs.columnText(0).?);
+    try std.testing.expect(!(try rs.next()));
+}
+
+test "ExecResult insert" {
+    var db = try Db.open(":memory:");
+    defer db.close();
+    try db.exec("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)");
+
+    const bind_vals: []const ?[]const u8 = &.{"alice"};
+    var er = try ExecResult.exec(&db, "INSERT INTO test (name) VALUES (?)", bind_vals);
+    defer er.deinit();
+
+    try std.testing.expectEqual(@as(i64, 1), er.lastInsertId());
+    try std.testing.expectEqual(@as(i32, 1), er.rowsAffected());
+}
+
+test "ExecResult with null bind" {
+    var db = try Db.open(":memory:");
+    defer db.close();
+    try db.exec("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)");
+
+    const bind_vals: []const ?[]const u8 = &.{null};
+    var er = try ExecResult.exec(&db, "INSERT INTO test (value) VALUES (?)", bind_vals);
+    defer er.deinit();
+
+    try std.testing.expectEqual(@as(i64, 1), er.lastInsertId());
 }

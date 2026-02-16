@@ -1,40 +1,82 @@
 //! zzz_db - Database Layer for the Zzz Web Framework
 //!
-//! Provides SQLite support with connection pooling, comptime schema definitions,
+//! Provides SQLite and PostgreSQL support with connection pooling, comptime schema definitions,
 //! a composable query builder, and type-safe Repo operations.
+//! All core types are generic over a backend type (sqlite or postgres).
 
 const std = @import("std");
 
-// SQLite
+// Backend
+pub const backend = @import("backend.zig");
+pub const Dialect = backend.Dialect;
+
+// Backends
 pub const sqlite = @import("sqlite.zig");
 pub const SqliteError = sqlite.SqliteError;
 
-// Connection
-pub const Connection = @import("connection.zig").Connection;
-pub const ConnectionConfig = @import("connection.zig").ConnectionConfig;
+const db_options = @import("db_options");
+pub const postgres_enabled = db_options.postgres_enabled;
+pub const postgres = if (db_options.postgres_enabled) @import("postgres.zig") else struct {};
 
-// Pool
+// Generic types
+pub const Connection = @import("connection.zig").Connection;
+pub const ConnectionState = @import("connection.zig").ConnectionState;
 pub const Pool = @import("pool.zig").Pool;
 pub const PoolConfig = @import("pool.zig").PoolConfig;
 pub const PooledConnection = @import("pool.zig").PooledConnection;
+pub const Repo = @import("repo.zig").Repo;
+pub const Transaction = @import("transaction.zig").Transaction;
+pub const IsolationLevel = @import("transaction.zig").IsolationLevel;
 
-// Schema
+// Schema & Query
 pub const Schema = @import("schema.zig");
-
-// Query
+pub const AssociationType = Schema.AssociationType;
+pub const AssociationDef = Schema.AssociationDef;
 pub const Query = @import("query.zig").Query;
 pub const Op = @import("query.zig").Op;
 pub const Order = @import("query.zig").Order;
+pub const JoinType = @import("query.zig").JoinType;
+pub const Aggregate = @import("query.zig").Aggregate;
 
-// Repo
-pub const Repo = @import("repo.zig").Repo;
+// Changeset
+pub const Changeset = @import("changeset.zig").Changeset;
+
+// Migration
+pub const Migration = @import("migration.zig");
+pub const MigrationDef = Migration.MigrationDef;
+pub const MigrationRunner = Migration.Runner;
+pub const MigrationContext = Migration.MigrationContext;
+pub const ColumnDef = Migration.ColumnDef;
+pub const ColumnType = Migration.ColumnType;
+pub const MigrationStatus = Migration.MigrationStatus;
+
+// Helpers
 pub const freeAll = @import("repo.zig").freeAll;
 pub const freeOne = @import("repo.zig").freeOne;
 
-// Transactions
-pub const Transaction = @import("transaction.zig");
+// Testing utilities
+pub const TestSandbox = @import("testing.zig").TestSandbox;
+pub const Factory = @import("testing.zig").Factory;
+pub const seed = @import("testing.zig").seed;
 
-pub const version = "0.1.0";
+// Convenience aliases — backward compatible
+pub const SqliteConnection = Connection(sqlite);
+pub const SqlitePool = Pool(sqlite);
+pub const SqlitePoolConfig = PoolConfig(sqlite);
+pub const SqliteRepo = Repo(sqlite);
+pub const SqliteTransaction = Transaction(sqlite);
+pub const SqliteMigrationRunner = MigrationRunner(sqlite);
+pub const SqliteMigrationDef = MigrationDef(sqlite);
+
+pub const PgConnection = if (db_options.postgres_enabled) Connection(postgres) else struct {};
+pub const PgPool = if (db_options.postgres_enabled) Pool(postgres) else struct {};
+pub const PgPoolConfig = if (db_options.postgres_enabled) PoolConfig(postgres) else struct {};
+pub const PgRepo = if (db_options.postgres_enabled) Repo(postgres) else struct {};
+pub const PgTransaction = if (db_options.postgres_enabled) Transaction(postgres) else struct {};
+pub const PgMigrationRunner = if (db_options.postgres_enabled) MigrationRunner(postgres) else struct {};
+pub const PgMigrationDef = if (db_options.postgres_enabled) MigrationDef(postgres) else struct {};
+
+pub const version = "0.2.0";
 
 test {
     std.testing.refAllDecls(@This());
