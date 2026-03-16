@@ -4,7 +4,7 @@ const connection_mod = @import("connection.zig");
 const ConnectionState = connection_mod.ConnectionState;
 const sqlite = @import("sqlite.zig");
 
-fn spinLock(m: *std.Thread.Mutex) void {
+fn spinLock(m: *std.atomic.Mutex) void {
     while (!m.tryLock()) {}
 }
 
@@ -42,7 +42,7 @@ pub fn Pool(comptime Backend: type) type {
         connections: [max_pool_size]Conn = undefined,
         in_use: [max_pool_size]bool = [_]bool{false} ** max_pool_size,
         size: u16,
-        mutex: std.Thread.Mutex = .{},
+        mutex: std.atomic.Mutex = .unlocked,
 
         pub fn init(config: PoolConfig(Backend)) !Self {
             var pool = Self{

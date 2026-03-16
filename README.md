@@ -1,6 +1,11 @@
 # zzz_db
 
-A database abstraction layer for the zzz web framework. Provides unified SQLite and PostgreSQL support with compile-time schema definitions, type-safe repositories, composable query builders, and connection pooling.
+Database ORM for the zzz web framework.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Zig](https://img.shields.io/badge/Zig-0.16.0-orange.svg)](https://ziglang.org/)
+
+A database abstraction layer providing unified SQLite and PostgreSQL support with compile-time schema definitions, type-safe repositories, composable query builders, and connection pooling.
 
 ## Features
 
@@ -139,12 +144,28 @@ zig build -Dpostgres=true
 zig build test -Dpostgres=true
 ```
 
+## Documentation
+
+Full documentation available at [docs.zzz.seemsindie.com](https://docs.zzz.seemsindie.com) under the Database section.
+
+## Ecosystem
+
+| Package | Description |
+|---------|-------------|
+| [zzz.zig](https://github.com/seemsindie/zzz.zig) | Core web framework |
+| [zzz_db](https://github.com/seemsindie/zzz_db) | Database ORM (SQLite + PostgreSQL) |
+| [zzz_jobs](https://github.com/seemsindie/zzz_jobs) | Background job processing |
+| [zzz_mailer](https://github.com/seemsindie/zzz_mailer) | Email sending |
+| [zzz_template](https://github.com/seemsindie/zzz_template) | Template engine |
+| [zzz_cli](https://github.com/seemsindie/zzz_cli) | CLI tooling |
+
 ## Requirements
 
 - Zig 0.16.0-dev.2535+b5bd49460 or later
-- SQLite3 (`libsqlite3-dev` on Linux, included on macOS)
-- PostgreSQL (`libpq-dev` on Linux, optional)
+- All dependencies are vendored or fetched automatically -- no system libraries required
+  - SQLite is vendored as an amalgamation build
+  - libpq is fetched via `build.zig.zon` for PostgreSQL support
 
 ## License
 
-MIT License - Copyright (c) 2026 Ivan Stamenkovic
+MIT License -- Copyright (c) 2026 Ivan Stamenkovic
