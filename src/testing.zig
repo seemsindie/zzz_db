@@ -97,7 +97,7 @@ pub fn Factory(comptime Backend: type, comptime Schema: type) type {
             const struct_fields = @typeInfo(Schema).@"struct".fields;
             inline for (struct_fields) |f| {
                 if (f.default_value_ptr) |ptr| {
-                    const default_ptr: *align(f.alignment) const f.type = @alignCast(@ptrCast(ptr));
+                    const default_ptr: *align(f.alignment orelse 1) const f.type = @alignCast(@ptrCast(ptr));
                     @field(record, f.name) = default_ptr.*;
                 } else if (f.type == []const u8) {
                     @field(record, f.name) = "";

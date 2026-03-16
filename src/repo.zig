@@ -547,6 +547,7 @@ fn readColumn(comptime T: type, comptime Backend: type, rs: *Backend.ResultSet, 
 }
 
 fn mapRow(comptime T: type, comptime Backend: type, rs: *Backend.ResultSet, allocator: std.mem.Allocator) !T {
+    @setEvalBranchQuota(100000);
     var result: T = undefined;
     const struct_fields = @typeInfo(T).@"struct".fields;
 
