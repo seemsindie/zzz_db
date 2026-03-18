@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const libpq_dep = if (postgres_enabled)
-        b.dependency("libpq", .{ .target = target })
+        b.dependency("libpq", .{ .target = target, .ssl = .None, .@"disable-zlib" = true, .@"disable-zstd" = true })
     else
         null;
 
