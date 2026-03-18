@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    _ = b.standardOptimizeOption(.{});
+    const optimize = b.standardOptimizeOption(.{});
 
     const sqlite_enabled = b.option(bool, "sqlite", "Enable SQLite support") orelse true;
     const postgres_enabled = b.option(bool, "postgres", "Enable PostgreSQL support") orelse false;
@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const libpq_dep = if (postgres_enabled)
-        b.dependency("libpq", .{ .target = target, .ssl = .None, .@"disable-zlib" = true, .@"disable-zstd" = true })
+        b.dependency("libpq", .{ .target = target, .optimize = optimize, .ssl = .None, .@"disable-zlib" = true, .@"disable-zstd" = true })
     else
         null;
 
