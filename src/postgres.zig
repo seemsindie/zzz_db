@@ -23,12 +23,73 @@ pub const Db = struct {
     conn: *c.PGconn,
 
     pub fn open(conninfo: [:0]const u8) PgError!Db {
-        const pg_conn = c.PQconnectdb(conninfo.ptr) orelse return error.ConnectionFailed;
+        // On musl, libpq's URI parser (postgres://...) causes heap corruption
+        // in build_startup_packet. Convert URI to key=value format to bypass it.
+        var kv_buf: [1024]u8 = undefined;
+        const effective = uriToKeyValue(conninfo, &kv_buf) orelse conninfo;
+        const pg_conn = c.PQconnectdb(effective.ptr) orelse return error.ConnectionFailed;
         if (c.PQstatus(pg_conn) != c.CONNECTION_OK) {
             c.PQfinish(pg_conn);
             return error.ConnectionFailed;
         }
         return .{ .conn = pg_conn };
+    }
+
+    /// Convert postgres://user:pass@host:port/dbname to key=value format.
+    /// Returns null if the input is not a URI (already key=value).
+    fn uriToKeyValue(uri: [:0]const u8, buf: *[1024]u8) ?[:0]const u8 {
+        const prefix = "postgres://";
+        const alt_prefix = "postgresql://";
+        var rest: []const u8 = undefined;
+        if (std.mem.startsWith(u8, uri, prefix)) {
+            rest = uri[prefix.len..];
+        } else if (std.mem.startsWith(u8, uri, alt_prefix)) {
+            rest = uri[alt_prefix.len..];
+        } else {
+            return null; // not a URI
+        }
+
+        var user: []const u8 = "";
+        var password: []const u8 = "";
+        var host: []const u8 = "localhost";
+        var port: []const u8 = "5432";
+        var dbname: []const u8 = "";
+
+        // Split on @ to separate credentials from host
+        if (std.mem.indexOf(u8, rest, "@")) |at| {
+            const creds = rest[0..at];
+            rest = rest[at + 1 ..];
+            if (std.mem.indexOf(u8, creds, ":")) |colon| {
+                user = creds[0..colon];
+                password = creds[colon + 1 ..];
+            } else {
+                user = creds;
+            }
+        }
+
+        // Strip query params (?sslmode=disable etc)
+        if (std.mem.indexOf(u8, rest, "?")) |q| {
+            rest = rest[0..q];
+        }
+
+        // Split host:port/dbname
+        if (std.mem.indexOf(u8, rest, "/")) |slash| {
+            dbname = rest[slash + 1 ..];
+            rest = rest[0..slash];
+        }
+        if (std.mem.indexOf(u8, rest, ":")) |colon| {
+            host = rest[0..colon];
+            port = rest[colon + 1 ..];
+        } else if (rest.len > 0) {
+            host = rest;
+        }
+
+        const result = std.fmt.bufPrint(buf, "host={s} port={s} dbname={s} user={s} password={s} sslmode=disable\x00", .{
+            host, port, dbname, user, password,
+        }) catch return null;
+
+        // Return as sentinel-terminated slice (the \x00 we appended is the sentinel)
+        return buf[0 .. result.len - 1 :0];
     }
 
     pub fn close(self: *Db) void {
