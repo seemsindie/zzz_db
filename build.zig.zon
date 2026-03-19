@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0-dev.2905+5d71e3051",
     .dependencies = .{
         .libpq = .{
-            .url = "git+https://github.com/seemsindie/libpq#8c0fd1650ed0915409ed0c5bc49ccd461de24af6",
-            .hash = "libpq-5.18.1-QME6adcKAQA-barOtowO5RmIXoyHpa9M7Mfz4MDmVoj9",
+            .url = "git+https://github.com/seemsindie/libpq#2ae2d6a7b702bf50f7140431b96fe93f92f28de7",
+            .hash = "libpq-5.18.1-QME6acwKAQCF43RvLm-ky6ARL8i6kCzgPt1upY5EpO-4",
         },
     },
     .paths = .{
