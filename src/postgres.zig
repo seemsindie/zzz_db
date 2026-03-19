@@ -2,6 +2,9 @@ const std = @import("std");
 const backend = @import("backend.zig");
 
 pub const c = @cImport({
+    // Disable _FORTIFY_SOURCE to avoid glibc's bits/stdio2.h which uses
+    // __builtin_va_arg_pack (GCC-only, unsupported by Zig's clang).
+    @cUndef("_FORTIFY_SOURCE");
     @cInclude("libpq-fe.h");
 });
 
