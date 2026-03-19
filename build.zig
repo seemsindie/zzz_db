@@ -2,12 +2,10 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    _ = b.standardOptimizeOption(.{});
+    const optimize = b.standardOptimizeOption(.{});
 
     const sqlite_enabled = b.option(bool, "sqlite", "Enable SQLite support") orelse true;
     const postgres_enabled = b.option(bool, "postgres", "Enable PostgreSQL support") orelse false;
-
-    const is_macos = target.result.os.tag == .macos;
 
     // Create a module for the DB build options so source can query at comptime
     const db_options = b.addOptions();
@@ -22,44 +20,31 @@ pub fn build(b: *std.Build) void {
     mod.addImport("db_options", db_options.createModule());
 
     if (sqlite_enabled) {
-        mod.linkSystemLibrary("sqlite3", .{});
+        mod.addCSourceFiles(.{
+            .files = &.{"vendor/sqlite3/sqlite3.c"},
+            .flags = &.{"-DSQLITE_THREADSAFE=1"},
+        });
+        mod.addIncludePath(b.path("vendor/sqlite3"));
         mod.link_libc = true;
-        if (is_macos) {
-            mod.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/include" });
-            mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/lib" });
-        }
     }
 
+    const libpq_dep = if (postgres_enabled)
+        b.dependency("libpq", .{ .target = target, .optimize = optimize, .ssl = .None, .@"disable-zlib" = true, .@"disable-zstd" = true })
+    else
+        null;
+
     if (postgres_enabled) {
-        mod.linkSystemLibrary("pq", .{});
+        mod.linkLibrary(libpq_dep.?.artifact("pq"));
         mod.link_libc = true;
-        if (is_macos) {
-            mod.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/libpq/include" });
-            mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/libpq/lib" });
-        }
     }
 
     const mod_tests = b.addTest(.{
         .root_module = mod,
     });
 
-    if (sqlite_enabled) {
-        mod_tests.root_module.linkSystemLibrary("sqlite3", .{});
-        mod_tests.root_module.link_libc = true;
-        if (is_macos) {
-            mod_tests.root_module.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/include" });
-            mod_tests.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/lib" });
-        }
-    }
-
-    if (postgres_enabled) {
-        mod_tests.root_module.linkSystemLibrary("pq", .{});
-        mod_tests.root_module.link_libc = true;
-        if (is_macos) {
-            mod_tests.root_module.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/libpq/include" });
-            mod_tests.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/libpq/lib" });
-        }
-    }
+    // No need to re-add C sources or libraries here — mod_tests shares mod's
+    // root_module, so all C sources, include paths, and linked libraries are
+    // already attached.
 
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
