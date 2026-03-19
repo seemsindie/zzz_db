@@ -146,7 +146,7 @@ zig build test -Dpostgres=true
 
 ## Documentation
 
-Full documentation available at [docs.zzz.seemsindie.com](https://docs.zzz.seemsindie.com) under the Database section.
+Full documentation available at [docs.zzz.indielab.link](https://docs.zzz.indielab.link) under the Database section.
 
 ## Ecosystem
 
