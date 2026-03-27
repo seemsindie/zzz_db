@@ -30,9 +30,9 @@ jobs:
       postgres:
         image: postgres:17
         env:
-          POSTGRES_USER: zzz
-          POSTGRES_PASSWORD: zzz
-          POSTGRES_DB: zzz_test
+          POSTGRES_USER: pidgn
+          POSTGRES_PASSWORD: pidgn
+          POSTGRES_DB: pidgn_test
         options: >-
           --health-cmd pg_isready
           --health-interval 10s

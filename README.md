@@ -1,6 +1,6 @@
-# zzz_db
+# pidgn_db
 
-Database ORM for the zzz web framework.
+Database ORM for the pidgn web framework.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Zig](https://img.shields.io/badge/Zig-0.16.0-orange.svg)](https://ziglang.org/)
@@ -25,7 +25,7 @@ A database abstraction layer providing unified SQLite and PostgreSQL support wit
 ### Define a Schema
 
 ```zig
-const zzz_db = @import("zzz_db");
+const pidgn_db = @import("pidgn_db");
 
 pub const User = struct {
     id: i64,
@@ -34,7 +34,7 @@ pub const User = struct {
     inserted_at: i64 = 0,
     updated_at: i64 = 0,
 
-    pub const Meta = zzz_db.Schema.define(@This(), .{
+    pub const Meta = pidgn_db.Schema.define(@This(), .{
         .table = "users",
         .primary_key = "id",
         .timestamps = true,
@@ -46,10 +46,10 @@ pub const User = struct {
 
 ```zig
 // SQLite
-var pool = try zzz_db.SqlitePool.init(.{ .size = 5, .connection = .{} });
+var pool = try pidgn_db.SqlitePool.init(.{ .size = 5, .connection = .{} });
 defer pool.deinit();
 
-var repo = zzz_db.SqliteRepo.init(&pool);
+var repo = pidgn_db.SqliteRepo.init(&pool);
 
 // Insert
 const user = try repo.insert(User, .{
@@ -59,7 +59,7 @@ const user = try repo.insert(User, .{
 }, allocator);
 
 // Query
-const query = zzz_db.Query(User).init()
+const query = pidgn_db.Query(User).init()
     .where("name", .eq, "Alice")
     .order("inserted_at", .desc)
     .limit(10);
@@ -71,7 +71,7 @@ const users = try repo.all(User, query, allocator);
 
 ```zig
 const migrations = &.{
-    zzz_db.SqliteMigrationDef{
+    pidgn_db.SqliteMigrationDef{
         .version = 1,
         .name = "create_users",
         .up = &struct {
@@ -95,7 +95,7 @@ const migrations = &.{
 ### Query Builder
 
 ```zig
-const q = zzz_db.Query(User).init()
+const q = pidgn_db.Query(User).init()
     .where("email", .like, "%@example.com")
     .orWhere("name", .eq, "admin")
     .join("posts", "users.id", "posts.user_id")
@@ -112,7 +112,7 @@ const total = try repo.count(User, q, allocator);
 ### Transactions
 
 ```zig
-var tx = zzz_db.SqliteTransaction;
+var tx = pidgn_db.SqliteTransaction;
 try tx.begin(&conn);
 // ... operations ...
 try tx.commit(&conn);
@@ -125,7 +125,7 @@ try tx.beginWithIsolation(&conn, .serializable);
 
 ```zig
 test "user creation" {
-    var sandbox = try zzz_db.TestSandbox(sqlite).begin(&conn);
+    var sandbox = try pidgn_db.TestSandbox(sqlite).begin(&conn);
     defer sandbox.rollback(); // auto-rollback after test
 
     const user = try repo.insert(User, .{ ... }, std.testing.allocator);
@@ -146,18 +146,18 @@ zig build test -Dpostgres=true
 
 ## Documentation
 
-Full documentation available at [docs.zzz.indielab.link](https://docs.zzz.indielab.link) under the Database section.
+Full documentation available at [docs.pidgn.indielab.link](https://docs.pidgn.indielab.link) under the Database section.
 
 ## Ecosystem
 
 | Package | Description |
 |---------|-------------|
-| [zzz.zig](https://github.com/seemsindie/zzz.zig) | Core web framework |
-| [zzz_db](https://github.com/seemsindie/zzz_db) | Database ORM (SQLite + PostgreSQL) |
-| [zzz_jobs](https://github.com/seemsindie/zzz_jobs) | Background job processing |
-| [zzz_mailer](https://github.com/seemsindie/zzz_mailer) | Email sending |
-| [zzz_template](https://github.com/seemsindie/zzz_template) | Template engine |
-| [zzz_cli](https://github.com/seemsindie/zzz_cli) | CLI tooling |
+| [pidgn.zig](https://github.com/seemsindie/pidgn.zig) | Core web framework |
+| [pidgn_db](https://github.com/seemsindie/pidgn_db) | Database ORM (SQLite + PostgreSQL) |
+| [pidgn_jobs](https://github.com/seemsindie/pidgn_jobs) | Background job processing |
+| [pidgn_mailer](https://github.com/seemsindie/pidgn_mailer) | Email sending |
+| [pidgn_template](https://github.com/seemsindie/pidgn_template) | Template engine |
+| [pidgn_cli](https://github.com/seemsindie/pidgn_cli) | CLI tooling |
 
 ## Requirements
 

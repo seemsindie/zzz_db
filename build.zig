@@ -12,7 +12,7 @@ pub fn build(b: *std.Build) void {
     db_options.addOption(bool, "sqlite_enabled", sqlite_enabled);
     db_options.addOption(bool, "postgres_enabled", postgres_enabled);
 
-    const mod = b.addModule("zzz_db", .{
+    const mod = b.addModule("pidgn_db", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });

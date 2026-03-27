@@ -1,6 +1,6 @@
 .{
-    .name = .zzz_db,
-    .version = "0.2.0-beta.1",
+    .name = .pidgn_db,
+    .version = "0.3.0-beta.1",
     .fingerprint = 0x6956f0c8964d3e36,
     .minimum_zig_version = "0.16.0-dev.2905+5d71e3051",
     .dependencies = .{

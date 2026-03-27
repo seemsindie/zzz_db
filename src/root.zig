@@ -1,4 +1,4 @@
-//! zzz_db - Database Layer for the Zzz Web Framework
+//! pidgn_db - Database Layer for the Pidgn Web Framework
 //!
 //! Provides SQLite and PostgreSQL support with connection pooling, comptime schema definitions,
 //! a composable query builder, and type-safe Repo operations.
